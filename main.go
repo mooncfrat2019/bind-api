@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -21,12 +22,14 @@ import (
 var (
 	ZoneDir      string
 	ZoneConfFile string
+	NamedConf    string // Путь к основному named.conf
 )
 
 // --- Константы по умолчанию ---
 const (
 	DefaultZoneDir      = "/var/named/"
-	DefaultZoneConfFile = "/etc/named.conf"
+	DefaultZoneConfFile = "/etc/named.zones.conf"
+	DefaultNamedConf    = "/etc/named.conf"
 	DefaultTTL          = 3600
 	DefaultRefresh      = 3600
 	DefaultRetry        = 600
@@ -45,7 +48,7 @@ type Response struct {
 type ZoneRequest struct {
 	Name  string `json:"name" binding:"required"`
 	Email string `json:"email"`
-	Type  string `json:"type"` // "forward" или "reverse"
+	Type  string `json:"type"`
 }
 
 type RecordRequest struct {
@@ -53,7 +56,7 @@ type RecordRequest struct {
 	Type       string `json:"type" binding:"required"`
 	Value      string `json:"value" binding:"required"`
 	TTL        int    `json:"ttl"`
-	ReversePtr string `json:"reverse_ptr"` // Имя для PTR записи (опционально)
+	ReversePtr string `json:"reverse_ptr"`
 }
 
 type ZoneInfo struct {
@@ -70,6 +73,12 @@ type RecordInfo struct {
 	Value string `json:"value"`
 }
 
+type ZoneConfig struct {
+	Name string
+	File string
+	Type string
+}
+
 // --- Инициализация и Утилиты ---
 
 func initConfig() {
@@ -83,7 +92,17 @@ func initConfig() {
 		ZoneConfFile = DefaultZoneConfFile
 	}
 
-	log.Printf("Конфигурация: ZoneDir=%s, ZoneConfFile=%s", ZoneDir, ZoneConfFile)
+	NamedConf = os.Getenv("BIND_NAMED_CONF")
+	if NamedConf == "" {
+		NamedConf = DefaultNamedConf
+	}
+
+	// Убедимся, что путь заканчивается на /
+	if !strings.HasSuffix(ZoneDir, "/") {
+		ZoneDir += "/"
+	}
+
+	log.Printf("Конфигурация: ZoneDir=%s, ZoneConfFile=%s, NamedConf=%s", ZoneDir, ZoneConfFile, NamedConf)
 }
 
 func sendResponse(c *gin.Context, status int, success bool, message string, data interface{}) {
@@ -95,18 +114,21 @@ func sendResponse(c *gin.Context, status int, success bool, message string, data
 }
 
 func reloadBind() error {
+	log.Println("Выполнение rndc reload...")
 	cmd := exec.Command("rndc", "reload")
 	out, err := cmd.CombinedOutput()
+	log.Printf("rndc reload output: %s, error: %v", string(out), err)
 	if err != nil {
 		return fmt.Errorf("rndc reload failed: %v, output: %s", err, string(out))
 	}
+	log.Println("rndc reload выполнен успешно")
 	return nil
 }
 
 func fixPermissions(filename string) error {
 	cmd := exec.Command("chown", "named:named", filename)
 	if err := cmd.Run(); err != nil {
-		return err
+		log.Printf("WARNING: chown failed for %s: %v", filename, err)
 	}
 	cmd = exec.Command("restorecon", "-v", filename)
 	_ = cmd.Run()
@@ -129,15 +151,23 @@ func validateRecordName(name string) bool {
 
 // incrementSerial увеличивает значение Serial в SOA записи на 1
 func incrementSerial(zoneFile string) error {
+	log.Printf("Увеличение Serial в файле: %s", zoneFile)
+
+	// Проверка существования файла
+	if _, err := os.Stat(zoneFile); os.IsNotExist(err) {
+		return fmt.Errorf("файл зоны не существует: %s", zoneFile)
+	}
+
 	content, err := os.ReadFile(zoneFile)
 	if err != nil {
-		return err
+		return fmt.Errorf("не удалось прочитать файл: %v", err)
 	}
 
 	lines := strings.Split(string(content), "\n")
 	var newLines []string
 	inSoa := false
 	soaComplete := false
+	serialUpdated := false
 
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
@@ -162,6 +192,8 @@ func incrementSerial(zoneFile string) error {
 					fields[i] = strings.Replace(field, cleanField, strconv.FormatUint(newNum, 10), 1)
 					newLines = append(newLines, strings.Join(fields, " "))
 					updated = true
+					serialUpdated = true
+					log.Printf("Serial увеличен: %d -> %d", num, newNum)
 					break
 				}
 			}
@@ -172,6 +204,10 @@ func incrementSerial(zoneFile string) error {
 		}
 
 		newLines = append(newLines, line)
+	}
+
+	if !serialUpdated {
+		log.Println("WARNING: Serial не был увеличен (не найден в файле)")
 	}
 
 	return os.WriteFile(zoneFile, []byte(strings.Join(newLines, "\n")), 0640)
@@ -237,6 +273,7 @@ func readZoneFileSimple(zoneFile string) ([]RecordInfo, error) {
 }
 
 func appendRecordToFile(zoneFile, recordLine string) error {
+	log.Printf("Добавление записи в файл %s: %s", zoneFile, recordLine)
 	f, err := os.OpenFile(zoneFile, os.O_APPEND|os.O_WRONLY, 0640)
 	if err != nil {
 		return err
@@ -279,6 +316,7 @@ func deleteRecordFromFile(zoneFile, recordName, recordType string) error {
 				fqdnName += "."
 			}
 			if (name == recordName || name == fqdnName || (recordName == "@" && name == "")) && foundType {
+				log.Printf("Удаление записи: %s %s", name, recordType)
 				continue
 			}
 		}
@@ -293,6 +331,82 @@ func deleteRecordFromFile(zoneFile, recordName, recordType string) error {
 	return os.WriteFile(zoneFile, []byte(strings.Join(lines, "\n")+"\n"), 0640)
 }
 
+// --- Парсинг конфига ---
+
+// parseZoneConfig парсит файлы конфигурации и возвращает список зон
+func parseZoneConfig() ([]ZoneConfig, error) {
+	var zones []ZoneConfig
+	configFiles := []string{NamedConf, ZoneConfFile}
+
+	// Регулярное выражение для поиска зон
+	// zone "name" IN { ... file "filename"; ... };
+	zoneRegex := regexp.MustCompile(`zone\s+"([^"]+)"\s+(?:IN\s+)?\{[^}]*file\s+"([^"]+)"`)
+
+	for _, configFile := range configFiles {
+		if _, err := os.Stat(configFile); os.IsNotExist(err) {
+			continue
+		}
+
+		content, err := os.ReadFile(configFile)
+		if err != nil {
+			log.Printf("WARNING: Не удалось прочитать конфиг %s: %v", configFile, err)
+			continue
+		}
+
+		matches := zoneRegex.FindAllStringSubmatch(string(content), -1)
+		for _, match := range matches {
+			if len(match) >= 3 {
+				zoneName := match[1]
+				zoneFile := match[2]
+
+				// Если путь относительный, добавляем ZoneDir
+				if !filepath.IsAbs(zoneFile) {
+					zoneFile = filepath.Join(ZoneDir, zoneFile)
+				}
+
+				zoneType := "forward"
+				if strings.Contains(zoneName, "in-addr.arpa") || strings.Contains(zoneName, "ip6.arpa") {
+					zoneType = "reverse"
+				}
+
+				zones = append(zones, ZoneConfig{
+					Name: zoneName,
+					File: zoneFile,
+					Type: zoneType,
+				})
+				log.Printf("Найдена зона в конфиге: %s -> %s (%s)", zoneName, zoneFile, zoneType)
+			}
+		}
+	}
+
+	return zones, nil
+}
+
+// getZoneFileFromConfig ищет файл зоны по имени в конфигурации
+func getZoneFileFromConfig(zoneName string) (string, bool) {
+	zones, err := parseZoneConfig()
+	if err != nil {
+		log.Printf("Ошибка парсинга конфига: %v", err)
+		return "", false
+	}
+
+	for _, zone := range zones {
+		if zone.Name == zoneName {
+			log.Printf("Найден файл зоны %s в конфиге: %s", zoneName, zone.File)
+			return zone.File, true
+		}
+	}
+
+	log.Printf("Зона %s не найдена в конфиге", zoneName)
+	return "", false
+}
+
+// zoneExistsInConfig проверяет существует ли зона в конфигурации
+func zoneExistsInConfig(zoneName string) bool {
+	_, exists := getZoneFileFromConfig(zoneName)
+	return exists
+}
+
 // --- Reverse DNS утилиты ---
 
 // getReverseZoneName возвращает имя обратной зоны для IPv4
@@ -303,24 +417,15 @@ func getReverseZoneName(ip string) (string, error) {
 	}
 
 	if parsedIP.To4() != nil {
-		// IPv4: 192.168.1.100 -> 1.168.192.in-addr.arpa
 		parts := strings.Split(parsedIP.To4().String(), ".")
 		if len(parts) != 4 {
 			return "", fmt.Errorf("неверный формат IPv4")
 		}
+		// 10.69.13.100 -> 13.69.10.in-addr.arpa
 		return fmt.Sprintf("%s.%s.%s.in-addr.arpa", parts[2], parts[1], parts[0]), nil
 	}
 
-	// IPv6: упрощённая поддержка /64
-	// 2001:db8::1 -> 8.b.d.0.1.0.0.2.ip6.arpa (первые 64 бита)
 	return "", fmt.Errorf("IPv6 обратные зоны требуют ручной настройки")
-}
-
-// getReverseZoneFile возвращает путь к файлу обратной зоны
-func getReverseZoneFile(reverseZoneName string) string {
-	// Заменяем точки на подчёркивания для имени файла
-	fileName := strings.ReplaceAll(reverseZoneName, ".", "_")
-	return filepath.Join(ZoneDir, fileName+".rev")
 }
 
 // getPtrRecordName возвращает имя для PTR записи (последний октет для IPv4)
@@ -341,75 +446,34 @@ func getPtrRecordName(ip string) (string, error) {
 	return "", fmt.Errorf("IPv6 требует ручной настройки")
 }
 
-// createReverseZone создаёт файл обратной зоны
-func createReverseZone(reverseZoneName string, email string) error {
-	zoneFile := getReverseZoneFile(reverseZoneName)
-
-	// Проверка на существование
-	if _, err := os.Stat(zoneFile); err == nil {
-		return nil // Зона уже существует
-	}
-
-	now := time.Now()
-	serial := fmt.Sprintf("%d%02d%02d01", now.Year(), now.Month(), now.Day())
-
-	zoneContent := fmt.Sprintf(`$TTL %d
-@	IN	SOA	ns1.%s. %s (
-					%s	; Serial
-					%d	; Refresh
-					%d	; Retry
-					%d	; Expire
-					%d )	; Negative Cache TTL
-;
-@	IN	NS	ns1.%s.
-`, DefaultTTL, reverseZoneName, email, serial, DefaultRefresh, DefaultRetry, DefaultExpire, DefaultNegative, reverseZoneName)
-
-	if err := os.WriteFile(zoneFile, []byte(zoneContent), 0640); err != nil {
-		return err
-	}
-
-	if err := fixPermissions(zoneFile); err != nil {
-		return err
-	}
-
-	// Добавляем объявление зоны в конфиг
-	zoneConfig := fmt.Sprintf(`
-zone "%s" {
-    type master;
-    file "%s";
-};
-`, reverseZoneName, zoneFile)
-
-	confFile, err := os.OpenFile(ZoneConfFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
-	if err != nil {
-		return err
-	}
-	defer confFile.Close()
-
-	if _, err := confFile.WriteString(zoneConfig); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// addPtrRecord добавляет PTR запись в обратную зону
+// addPtrRecord добавляет PTR запись в существующую обратную зону
 func addPtrRecord(ip string, ptrName string, ttl int) error {
+	log.Printf("Добавление PTR записи: IP=%s, PTR=%s", ip, ptrName)
+
 	reverseZoneName, err := getReverseZoneName(ip)
 	if err != nil {
-		return err
+		return fmt.Errorf("ошибка получения имени обратной зоны: %v", err)
+	}
+	log.Printf("Имя обратной зоны: %s", reverseZoneName)
+
+	// Проверяем существует ли обратная зона в конфиге
+	zoneFile, exists := getZoneFileFromConfig(reverseZoneName)
+	if !exists {
+		return fmt.Errorf("обратная зона %s не найдена в конфигурации", reverseZoneName)
 	}
 
-	// Создаём обратную зону если не существует
-	if err := createReverseZone(reverseZoneName, "admin."+reverseZoneName); err != nil {
-		return err
+	log.Printf("Файл обратной зоны из конфига: %s", zoneFile)
+
+	// Проверка существования файла
+	if _, err := os.Stat(zoneFile); os.IsNotExist(err) {
+		return fmt.Errorf("файл обратной зоны не существует: %s", zoneFile)
 	}
 
-	zoneFile := getReverseZoneFile(reverseZoneName)
 	ptrRecordName, err := getPtrRecordName(ip)
 	if err != nil {
-		return err
+		return fmt.Errorf("ошибка получения имени PTR записи: %v", err)
 	}
+	log.Printf("Имя PTR записи (октет): %s", ptrRecordName)
 
 	if ttl == 0 {
 		ttl = DefaultTTL
@@ -417,34 +481,43 @@ func addPtrRecord(ip string, ptrName string, ttl int) error {
 
 	// Формат PTR записи: <октет> IN PTR <имя.домена.>
 	recordLine := fmt.Sprintf("%s\t%d\tIN\tPTR\t%s", ptrRecordName, ttl, ptrName)
+	log.Printf("Строка PTR записи: %s", recordLine)
 
 	if err := appendRecordToFile(zoneFile, recordLine); err != nil {
-		return err
+		return fmt.Errorf("ошибка добавления записи в файл: %v", err)
 	}
 
 	if err := incrementSerial(zoneFile); err != nil {
-		return err
+		return fmt.Errorf("ошибка обновления Serial: %v", err)
 	}
 
 	if err := fixPermissions(zoneFile); err != nil {
 		return err
 	}
 
+	log.Printf("PTR запись добавлена успешно")
 	return nil
 }
 
 // deletePtrRecord удаляет PTR запись из обратной зоны
 func deletePtrRecord(ip string) error {
+	log.Printf("Удаление PTR записи для IP: %s", ip)
+
 	reverseZoneName, err := getReverseZoneName(ip)
 	if err != nil {
 		return err
 	}
 
-	zoneFile := getReverseZoneFile(reverseZoneName)
+	zoneFile, exists := getZoneFileFromConfig(reverseZoneName)
+	if !exists {
+		log.Printf("Обратная зона %s не найдена в конфиге, пропускаем удаление PTR", reverseZoneName)
+		return nil
+	}
 
 	// Проверка существования файла
 	if _, err := os.Stat(zoneFile); os.IsNotExist(err) {
-		return nil // Файл не существует, ничего не делаем
+		log.Printf("Файл обратной зоны не существует: %s", zoneFile)
+		return nil
 	}
 
 	ptrRecordName, err := getPtrRecordName(ip)
@@ -464,6 +537,7 @@ func deletePtrRecord(ip string) error {
 		return err
 	}
 
+	log.Printf("PTR запись удалена успешно")
 	return nil
 }
 
@@ -485,52 +559,43 @@ func handleStatus(c *gin.Context) {
 }
 
 func handleConfig(c *gin.Context) {
+	zones, _ := parseZoneConfig()
+
 	sendResponse(c, http.StatusOK, true, "Текущая конфигурация", gin.H{
 		"zone_dir":    ZoneDir,
 		"zone_conf":   ZoneConfFile,
+		"named_conf":  NamedConf,
 		"default_ttl": DefaultTTL,
-		"api_port":    os.Getenv("PORT"),
+		"api_port":    os.Getenv("API_PORT"),
 		"gin_mode":    gin.Mode(),
 		"running_as":  os.Geteuid(),
 		"go_version":  strings.Replace(runtime.Version(), "go", "", -1),
+		"zones_found": len(zones),
 	})
 }
 
 func handleListZones(c *gin.Context) {
-	cmd := exec.Command("grep", "-oP", `zone\s+"\K[^"]+`, ZoneConfFile)
-	out, err := cmd.CombinedOutput()
-
-	var zones []ZoneInfo
-	if err == nil {
-		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-		for _, line := range lines {
-			if line != "" {
-				zoneType := "forward"
-				if strings.Contains(line, "in-addr.arpa") || strings.Contains(line, "ip6.arpa") {
-					zoneType = "reverse"
-				}
-
-				zoneFile := filepath.Join(ZoneDir, line+".zone")
-				if zoneType == "reverse" {
-					fileName := strings.ReplaceAll(line, ".", "_")
-					zoneFile = filepath.Join(ZoneDir, fileName+".rev")
-				}
-
-				count := 0
-				if recs, err := readZoneFileSimple(zoneFile); err == nil {
-					count = len(recs)
-				}
-				zones = append(zones, ZoneInfo{
-					Name:        line,
-					File:        zoneFile,
-					Type:        zoneType,
-					RecordCount: count,
-				})
-			}
-		}
+	zones, err := parseZoneConfig()
+	if err != nil {
+		sendResponse(c, http.StatusInternalServerError, false, "Ошибка парсинга конфига", err.Error())
+		return
 	}
 
-	sendResponse(c, http.StatusOK, true, "Список зон", gin.H{"zones": zones})
+	var zoneInfos []ZoneInfo
+	for _, zone := range zones {
+		count := 0
+		if recs, err := readZoneFileSimple(zone.File); err == nil {
+			count = len(recs)
+		}
+		zoneInfos = append(zoneInfos, ZoneInfo{
+			Name:        zone.Name,
+			File:        zone.File,
+			Type:        zone.Type,
+			RecordCount: count,
+		})
+	}
+
+	sendResponse(c, http.StatusOK, true, "Список зон", gin.H{"zones": zoneInfos})
 }
 
 func handleCreateZone(c *gin.Context) {
@@ -549,22 +614,30 @@ func handleCreateZone(c *gin.Context) {
 		req.Email = "admin." + req.Name
 	}
 
-	// Определяем тип зоны
 	zoneType := "forward"
 	if req.Type == "reverse" || strings.Contains(req.Name, "in-addr.arpa") || strings.Contains(req.Name, "ip6.arpa") {
 		zoneType = "reverse"
 	}
 
+	// Проверяем существует ли зона в конфиге
+	if zoneExistsInConfig(req.Name) {
+		sendResponse(c, http.StatusConflict, false, "Зона уже существует в конфигурации", nil)
+		return
+	}
+
+	// Определяем имя файла
 	var zoneFile string
 	if zoneType == "reverse" {
-		fileName := strings.ReplaceAll(req.Name, ".", "_")
-		zoneFile = filepath.Join(ZoneDir, fileName+".rev")
+		// Для обратной зоны используем .rev расширение
+		zoneFile = filepath.Join(ZoneDir, req.Name+".rev")
+		// Но в конфиге можно указать короткое имя
+		zoneFile = filepath.Join(ZoneDir, strings.ReplaceAll(req.Name, ".in-addr.arpa", "")+".rev")
 	} else {
 		zoneFile = filepath.Join(ZoneDir, req.Name+".zone")
 	}
 
 	if _, err := os.Stat(zoneFile); err == nil {
-		sendResponse(c, http.StatusConflict, false, "Зона уже существует", nil)
+		sendResponse(c, http.StatusConflict, false, "Файл зоны уже существует", nil)
 		return
 	}
 
@@ -598,11 +671,12 @@ func handleCreateZone(c *gin.Context) {
 	}
 
 	zoneConfig := fmt.Sprintf(`
-zone "%s" {
+zone "%s" IN {
     type master;
     file "%s";
+    allow-update { none; };
 };
-`, req.Name, zoneFile)
+`, req.Name, filepath.Base(zoneFile))
 
 	confFile, err := os.OpenFile(ZoneConfFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
 	if err != nil {
@@ -631,17 +705,15 @@ func handleGetZone(c *gin.Context) {
 		return
 	}
 
+	zoneFile, exists := getZoneFileFromConfig(zoneName)
+	if !exists {
+		sendResponse(c, http.StatusNotFound, false, "Зона не найдена в конфигурации", nil)
+		return
+	}
+
 	zoneType := "forward"
 	if strings.Contains(zoneName, "in-addr.arpa") || strings.Contains(zoneName, "ip6.arpa") {
 		zoneType = "reverse"
-	}
-
-	var zoneFile string
-	if zoneType == "reverse" {
-		fileName := strings.ReplaceAll(zoneName, ".", "_")
-		zoneFile = filepath.Join(ZoneDir, fileName+".rev")
-	} else {
-		zoneFile = filepath.Join(ZoneDir, zoneName+".zone")
 	}
 
 	records, err := readZoneFileSimple(zoneFile)
@@ -666,17 +738,10 @@ func handleDeleteZone(c *gin.Context) {
 		return
 	}
 
-	zoneType := "forward"
-	if strings.Contains(zoneName, "in-addr.arpa") || strings.Contains(zoneName, "ip6.arpa") {
-		zoneType = "reverse"
-	}
-
-	var zoneFile string
-	if zoneType == "reverse" {
-		fileName := strings.ReplaceAll(zoneName, ".", "_")
-		zoneFile = filepath.Join(ZoneDir, fileName+".rev")
-	} else {
-		zoneFile = filepath.Join(ZoneDir, zoneName+".zone")
+	zoneFile, exists := getZoneFileFromConfig(zoneName)
+	if !exists {
+		sendResponse(c, http.StatusNotFound, false, "Зона не найдена в конфигурации", nil)
+		return
 	}
 
 	if err := os.Remove(zoneFile); err != nil {
@@ -684,32 +749,38 @@ func handleDeleteZone(c *gin.Context) {
 		return
 	}
 
-	content, err := os.ReadFile(ZoneConfFile)
-	if err != nil {
-		sendResponse(c, http.StatusInternalServerError, false, "Ошибка чтения конфига", err.Error())
-		return
-	}
-
-	lines := strings.Split(string(content), "\n")
-	var newLines []string
-	skip := false
-	for _, line := range lines {
-		if strings.Contains(line, fmt.Sprintf(`zone "%s"`, zoneName)) {
-			skip = true
+	// Удаляем блок зоны из всех конфигов
+	configFiles := []string{NamedConf, ZoneConfFile}
+	for _, configFile := range configFiles {
+		if _, err := os.Stat(configFile); os.IsNotExist(err) {
 			continue
 		}
-		if skip {
-			if strings.Contains(line, "};") {
-				skip = false
+
+		content, err := os.ReadFile(configFile)
+		if err != nil {
+			continue
+		}
+
+		lines := strings.Split(string(content), "\n")
+		var newLines []string
+		skip := false
+		for _, line := range lines {
+			if strings.Contains(line, fmt.Sprintf(`zone "%s"`, zoneName)) {
+				skip = true
+				continue
 			}
-			continue
+			if skip {
+				if strings.Contains(line, "};") {
+					skip = false
+				}
+				continue
+			}
+			newLines = append(newLines, line)
 		}
-		newLines = append(newLines, line)
-	}
 
-	if err := os.WriteFile(ZoneConfFile, []byte(strings.Join(newLines, "\n")), 0640); err != nil {
-		sendResponse(c, http.StatusInternalServerError, false, "Ошибка обновления конфига", err.Error())
-		return
+		if err := os.WriteFile(configFile, []byte(strings.Join(newLines, "\n")), 0640); err != nil {
+			log.Printf("WARNING: Не удалось обновить конфиг %s: %v", configFile, err)
+		}
 	}
 
 	if err := fixPermissions(ZoneConfFile); err != nil {
@@ -764,18 +835,14 @@ func handleAddRecord(c *gin.Context) {
 		}
 	}
 
-	zoneType := "forward"
-	if strings.Contains(zoneName, "in-addr.arpa") || strings.Contains(zoneName, "ip6.arpa") {
-		zoneType = "reverse"
+	// Получаем файл зоны из конфига
+	zoneFile, exists := getZoneFileFromConfig(zoneName)
+	if !exists {
+		sendResponse(c, http.StatusNotFound, false, "Зона не найдена в конфигурации", nil)
+		return
 	}
 
-	var zoneFile string
-	if zoneType == "reverse" {
-		fileName := strings.ReplaceAll(zoneName, ".", "_")
-		zoneFile = filepath.Join(ZoneDir, fileName+".rev")
-	} else {
-		zoneFile = filepath.Join(ZoneDir, zoneName+".zone")
-	}
+	log.Printf("Файл зоны из конфига: %s", zoneFile)
 
 	ttl := req.TTL
 	if ttl == 0 {
@@ -796,16 +863,18 @@ func handleAddRecord(c *gin.Context) {
 
 	// Автоматическое создание PTR записи для A/AAAA записей
 	if (req.Type == "A" || req.Type == "AAAA") && req.ReversePtr != "" {
-		// Добавляем точку в конец если нет
 		ptrName := req.ReversePtr
 		if !strings.HasSuffix(ptrName, ".") {
 			ptrName += "."
 		}
 
+		log.Printf("Попытка создания PTR записи: %s -> %s", req.Value, ptrName)
 		if err := addPtrRecord(req.Value, ptrName, ttl); err != nil {
 			log.Printf("WARNING: Не удалось создать PTR запись: %v", err)
-			// Не прерываем операцию, PTR опционален
+			sendResponse(c, http.StatusOK, true, "Запись добавлена (PTR не создана: "+err.Error()+")", nil)
+			return
 		}
+		log.Printf("PTR запись создана успешно")
 	}
 
 	if err := fixPermissions(zoneFile); err != nil {
@@ -836,27 +905,24 @@ func handleDeleteRecord(c *gin.Context) {
 		return
 	}
 
+	zoneFile, exists := getZoneFileFromConfig(zoneName)
+	if !exists {
+		sendResponse(c, http.StatusNotFound, false, "Зона не найдена в конфигурации", nil)
+		return
+	}
+
+	// Для A/AAAA записей удаляем соответствующую PTR запись
 	zoneType := "forward"
 	if strings.Contains(zoneName, "in-addr.arpa") || strings.Contains(zoneName, "ip6.arpa") {
 		zoneType = "reverse"
 	}
 
-	var zoneFile string
-	if zoneType == "reverse" {
-		fileName := strings.ReplaceAll(zoneName, ".", "_")
-		zoneFile = filepath.Join(ZoneDir, fileName+".rev")
-	} else {
-		zoneFile = filepath.Join(ZoneDir, zoneName+".zone")
-	}
-
-	// Для A/AAAA записей удаляем соответствующую PTR запись
 	if zoneType == "forward" && (strings.ToUpper(recordType) == "A" || strings.ToUpper(recordType) == "AAAA") {
-		// Читаем зону чтобы найти IP адрес
 		records, err := readZoneFileSimple(zoneFile)
 		if err == nil {
 			for _, rec := range records {
 				if rec.Name == recordName && rec.Type == strings.ToUpper(recordType) {
-					// Нашли запись, удаляем PTR
+					log.Printf("Найдена запись для удаления PTR: %s -> %s", rec.Name, rec.Value)
 					if err := deletePtrRecord(rec.Value); err != nil {
 						log.Printf("WARNING: Не удалось удалить PTR запись: %v", err)
 					}
@@ -948,13 +1014,13 @@ func main() {
 		}
 	}
 
-	port := os.Getenv("PORT")
+	port := os.Getenv("API_PORT")
 	if port == "" {
 		port = ":9002"
 	}
 
 	log.Printf("BIND Manager API запущен на порту %s", port)
-	log.Printf("Используемые пути: ZoneDir=%s, ZoneConfFile=%s", ZoneDir, ZoneConfFile)
+	log.Printf("Используемые пути: ZoneDir=%s, ZoneConfFile=%s, NamedConf=%s", ZoneDir, ZoneConfFile, NamedConf)
 
 	if err := r.Run(port); err != nil {
 		log.Fatal(err)
