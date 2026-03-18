@@ -9,23 +9,24 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
+// --- Глобальные переменные (настраиваются через ENV) ---
 var (
-	PORT         string
 	ZoneDir      string
 	ZoneConfFile string
 )
 
-// --- Константы ---
+// --- Константы по умолчанию ---
 const (
-	DefaultPort         = "9002"
 	DefaultZoneDir      = "/var/named/"
-	DefaultZoneConfFile = "/etc/named.conf"
+	DefaultZoneConfFile = "/etc/named.zones.conf"
 	DefaultTTL          = 3600
 	DefaultRefresh      = 3600
 	DefaultRetry        = 600
@@ -33,7 +34,7 @@ const (
 	DefaultNegative     = 3600
 )
 
-// --- Структуры ---
+// --- Структуры данных ---
 
 type Response struct {
 	Success bool        `json:"success"`
@@ -66,8 +67,9 @@ type RecordInfo struct {
 	Value string `json:"value"`
 }
 
-// --- Утилиты ---
+// --- Инициализация и Утилиты ---
 
+// initConfig инициализирует конфигурацию из переменных окружения
 func initConfig() {
 	ZoneDir = os.Getenv("BIND_ZONE_DIR")
 	if ZoneDir == "" {
@@ -77,11 +79,6 @@ func initConfig() {
 	ZoneConfFile = os.Getenv("BIND_ZONE_CONF")
 	if ZoneConfFile == "" {
 		ZoneConfFile = DefaultZoneConfFile
-	}
-
-	PORT = os.Getenv("PORT")
-	if PORT == "" {
-		PORT = DefaultPort
 	}
 
 	log.Printf("Конфигурация: ZoneDir=%s, ZoneConfFile=%s", ZoneDir, ZoneConfFile)
@@ -128,7 +125,60 @@ func validateRecordName(name string) bool {
 	return true
 }
 
-// readZoneFileSimple читает файл зоны как текст и парсит базовые записи
+// incrementSerial увеличивает значение Serial в SOA записи на 1
+func incrementSerial(zoneFile string) error {
+	content, err := os.ReadFile(zoneFile)
+	if err != nil {
+		return err
+	}
+
+	lines := strings.Split(string(content), "\n")
+	var newLines []string
+	inSoa := false
+	soaComplete := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Начало SOA записи
+		if strings.Contains(strings.ToUpper(trimmed), "SOA") && !soaComplete {
+			inSoa = true
+			newLines = append(newLines, line)
+			continue
+		}
+
+		// Если внутри SOA, ищем serial
+		if inSoa && !soaComplete {
+			if strings.Contains(line, ")") {
+				soaComplete = true
+			}
+
+			fields := strings.Fields(line)
+			updated := false
+			for i, field := range fields {
+				cleanField := strings.Trim(field, "()_;")
+				// Serial обычно 10-значное число (YYYYMMDDNN)
+				if num, err := strconv.ParseUint(cleanField, 10, 32); err == nil && num >= 2020010100 {
+					newNum := num + 1
+					fields[i] = strings.Replace(field, cleanField, strconv.FormatUint(newNum, 10), 1)
+					newLines = append(newLines, strings.Join(fields, " "))
+					updated = true
+					break
+				}
+			}
+			if !updated {
+				newLines = append(newLines, line)
+			}
+			continue
+		}
+
+		newLines = append(newLines, line)
+	}
+
+	return os.WriteFile(zoneFile, []byte(strings.Join(newLines, "\n")), 0640)
+}
+
+// readZoneFileSimple читает файл зоны как текст
 func readZoneFileSimple(zoneFile string) ([]RecordInfo, error) {
 	file, err := os.Open(zoneFile)
 	if err != nil {
@@ -141,15 +191,9 @@ func readZoneFileSimple(zoneFile string) ([]RecordInfo, error) {
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-
-		// Пропускаем комментарии и пустые строки
 		if line == "" || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "$") {
 			continue
 		}
-
-		// Простой парсинг: имя [ttl] [класс] тип значение
-		// Пример: www 3600 IN A 192.168.1.1
-		// Пример: @ IN SOA ns1.example.com. admin.example.com. (...)
 
 		parts := strings.Fields(line)
 		if len(parts) < 3 {
@@ -158,15 +202,12 @@ func readZoneFileSimple(zoneFile string) ([]RecordInfo, error) {
 
 		rec := RecordInfo{}
 		idx := 0
-
-		// Имя записи
 		rec.Name = parts[idx]
 		idx++
 
-		// Пропускаем числовые значения (возможно TTL)
 		for idx < len(parts) {
 			if _, err := fmt.Sscanf(parts[idx], "%d", new(int)); err == nil {
-				rec.TTL, _ = fmt.Sscanf(parts[idx], "%d", new(int))
+				fmt.Sscanf(parts[idx], "%d", &rec.TTL)
 				idx++
 				continue
 			}
@@ -177,7 +218,6 @@ func readZoneFileSimple(zoneFile string) ([]RecordInfo, error) {
 			break
 		}
 
-		// Тип записи
 		if idx < len(parts) {
 			rec.Type = strings.ToUpper(parts[idx])
 			idx++
@@ -185,13 +225,11 @@ func readZoneFileSimple(zoneFile string) ([]RecordInfo, error) {
 			continue
 		}
 
-		// Значение (всё остальное)
 		if idx < len(parts) {
 			rec.Value = strings.Join(parts[idx:], " ")
 		}
 
-		// Добавляем только "полезные" записи (пропускаем сложные типа SOA в простом выводе)
-		if rec.Type == "A" || rec.Type == "AAAA" || rec.Type == "CNAME" || rec.Type == "MX" || rec.Type == "NS" || rec.Type == "TXT" {
+		if rec.Type == "A" || rec.Type == "AAAA" || rec.Type == "CNAME" || rec.Type == "MX" || rec.Type == "NS" || rec.Type == "TXT" || rec.Type == "SOA" {
 			records = append(records, rec)
 		}
 	}
@@ -199,21 +237,17 @@ func readZoneFileSimple(zoneFile string) ([]RecordInfo, error) {
 	return records, scanner.Err()
 }
 
-// appendRecordToFile добавляет запись в конец файла зоны
 func appendRecordToFile(zoneFile, recordLine string) error {
 	f, err := os.OpenFile(zoneFile, os.O_APPEND|os.O_WRONLY, 0640)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-
 	_, err = fmt.Fprintf(f, "%s\n", recordLine)
 	return err
 }
 
-// deleteRecordFromFile удаляет запись из файла (по имени и типу)
 func deleteRecordFromFile(zoneFile, recordName, recordType string) error {
-	// Читаем все строки
 	file, err := os.Open(zoneFile)
 	if err != nil {
 		return err
@@ -225,18 +259,14 @@ func deleteRecordFromFile(zoneFile, recordName, recordType string) error {
 		line := scanner.Text()
 		trimmed := strings.TrimSpace(line)
 
-		// Пропускаем комментарии и директивы
 		if trimmed == "" || strings.HasPrefix(trimmed, ";") || strings.HasPrefix(trimmed, "$") {
 			lines = append(lines, line)
 			continue
 		}
 
-		// Проверяем, совпадает ли запись
-		// Простая эвристика: строка начинается с имени (или @) и содержит тип
 		fields := strings.Fields(trimmed)
 		if len(fields) >= 2 {
 			name := fields[0]
-			// Ищем тип в полях
 			foundType := false
 			for _, f := range fields {
 				if strings.ToUpper(f) == strings.ToUpper(recordType) {
@@ -244,14 +274,13 @@ func deleteRecordFromFile(zoneFile, recordName, recordType string) error {
 					break
 				}
 			}
-			// Если имя и тип совпадают - пропускаем строку (удаляем)
-			// dns.Fqdn добавляет точку, сравниваем с учётом этого
+
 			fqdnName := recordName
 			if !strings.HasSuffix(fqdnName, ".") && fqdnName != "@" {
 				fqdnName += "."
 			}
 			if (name == recordName || name == fqdnName || (recordName == "@" && name == "")) && foundType {
-				continue // удаляем эту строку
+				continue
 			}
 		}
 		lines = append(lines, line)
@@ -262,7 +291,6 @@ func deleteRecordFromFile(zoneFile, recordName, recordType string) error {
 		return err
 	}
 
-	// Перезаписываем файл
 	return os.WriteFile(zoneFile, []byte(strings.Join(lines, "\n")+"\n"), 0640)
 }
 
@@ -280,6 +308,18 @@ func handleStatus(c *gin.Context) {
 	sendResponse(c, http.StatusOK, true, "Статус сервиса", gin.H{
 		"named_status": status,
 		"api_version":  "1.0.0",
+	})
+}
+
+func handleConfig(c *gin.Context) {
+	sendResponse(c, http.StatusOK, true, "Текущая конфигурация", gin.H{
+		"zone_dir":    ZoneDir,
+		"zone_conf":   ZoneConfFile,
+		"default_ttl": DefaultTTL,
+		"api_port":    os.Getenv("PORT"),
+		"gin_mode":    gin.Mode(),
+		"running_as":  os.Geteuid(),
+		"go_version":  strings.Replace(runtime.Version(), "go", "", -1),
 	})
 }
 
@@ -332,22 +372,25 @@ func handleCreateZone(c *gin.Context) {
 		return
 	}
 
-	// Формируем минимальный файл зоны как текст
 	soaEmail := strings.Replace(req.Email, "@", ".", -1)
 	if !strings.HasSuffix(soaEmail, ".") {
 		soaEmail += "."
 	}
 
+	// Генерируем Serial в формате YYYYMMDD01
+	now := time.Now()
+	serial := fmt.Sprintf("%d%02d%02d01", now.Year(), now.Month(), now.Day())
+
 	zoneContent := fmt.Sprintf(`$TTL %d
 @	IN	SOA	ns1.%s. %s (
-					%d	; Serial
+					%s	; Serial
 					%d	; Refresh
 					%d	; Retry
 					%d	; Expire
 					%d )	; Negative Cache TTL
 ;
 @	IN	NS	ns1.%s.
-`, DefaultTTL, req.Name, soaEmail, uint32(time.Now().Unix()), DefaultRefresh, DefaultRetry, DefaultExpire, DefaultNegative, req.Name)
+`, DefaultTTL, req.Name, soaEmail, serial, DefaultRefresh, DefaultRetry, DefaultExpire, DefaultNegative, req.Name)
 
 	if err := os.WriteFile(zoneFile, []byte(zoneContent), 0640); err != nil {
 		sendResponse(c, http.StatusInternalServerError, false, "Не удалось создать файл зоны", err.Error())
@@ -422,14 +465,12 @@ func handleDeleteZone(c *gin.Context) {
 		return
 	}
 
-	// Удаляем блок зоны из конфига
 	content, err := os.ReadFile(ZoneConfFile)
 	if err != nil {
 		sendResponse(c, http.StatusInternalServerError, false, "Ошибка чтения конфига", err.Error())
 		return
 	}
 
-	// Простое удаление блока zone "name" { ... };
 	lines := strings.Split(string(content), "\n")
 	var newLines []string
 	skip := false
@@ -483,14 +524,12 @@ func handleAddRecord(c *gin.Context) {
 		return
 	}
 
-	// Валидация типа записи
 	req.Type = strings.ToUpper(req.Type)
 	if req.Type != "A" && req.Type != "AAAA" && req.Type != "CNAME" && req.Type != "MX" && req.Type != "TXT" && req.Type != "NS" {
 		sendResponse(c, http.StatusBadRequest, false, "Поддерживаются только A, AAAA, CNAME, MX, TXT, NS", nil)
 		return
 	}
 
-	// Валидация IP для A/AAAA
 	if req.Type == "A" {
 		ip := net.ParseIP(req.Value)
 		if ip == nil || ip.To4() == nil {
@@ -508,8 +547,6 @@ func handleAddRecord(c *gin.Context) {
 
 	zoneFile := filepath.Join(ZoneDir, zoneName+".zone")
 
-	// Формируем строку записи
-	// Формат: [name] [ttl] IN [type] [value]
 	ttl := req.TTL
 	if ttl == 0 {
 		ttl = DefaultTTL
@@ -519,6 +556,12 @@ func handleAddRecord(c *gin.Context) {
 
 	if err := appendRecordToFile(zoneFile, recordLine); err != nil {
 		sendResponse(c, http.StatusInternalServerError, false, "Ошибка записи в файл зоны", err.Error())
+		return
+	}
+
+	// Увеличиваем Serial
+	if err := incrementSerial(zoneFile); err != nil {
+		sendResponse(c, http.StatusInternalServerError, false, "Ошибка обновления Serial", err.Error())
 		return
 	}
 
@@ -557,6 +600,12 @@ func handleDeleteRecord(c *gin.Context) {
 		return
 	}
 
+	// Увеличиваем Serial
+	if err := incrementSerial(zoneFile); err != nil {
+		sendResponse(c, http.StatusInternalServerError, false, "Ошибка обновления Serial", err.Error())
+		return
+	}
+
 	if err := fixPermissions(zoneFile); err != nil {
 		sendResponse(c, http.StatusInternalServerError, false, "Ошибка прав", err.Error())
 		return
@@ -592,14 +641,19 @@ func loggerMiddleware() gin.HandlerFunc {
 }
 
 func main() {
+	// Инициализация конфигурации из ENV
 	initConfig()
 
 	if os.Geteuid() != 0 {
-		log.Println("WARNING: Сервис запущен не от root. Возможны ошибки записи в /etc и /var/named")
+		log.Println("WARNING: Сервис запущен не от root. Возможны ошибки записи в системные директории")
 	}
 
 	if _, err := exec.LookPath("rndc"); err != nil {
 		log.Fatal("Утилита rndc не найдена в PATH. Установите bind-utils")
+	}
+
+	if _, err := os.Stat(ZoneDir); os.IsNotExist(err) {
+		log.Fatalf("Директория зон не существует: %s", ZoneDir)
 	}
 
 	gin.SetMode(gin.ReleaseMode)
@@ -611,6 +665,7 @@ func main() {
 	api := r.Group("/api")
 	{
 		api.GET("/status", handleStatus)
+		api.GET("/config", handleConfig)
 		api.POST("/reload", handleReload)
 		api.GET("/zones", handleListZones)
 		api.POST("/zone", handleCreateZone)
@@ -624,8 +679,13 @@ func main() {
 		}
 	}
 
-	port := ":" + PORT
-	log.Printf("BIND Manager API запущен на %s", port)
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = ":9002"
+	}
+
+	log.Printf("BIND Manager API запущен на порту %s", port)
+	log.Printf("Используемые пути: ZoneDir=%s, ZoneConfFile=%s", ZoneDir, ZoneConfFile)
 
 	if err := r.Run(port); err != nil {
 		log.Fatal(err)
