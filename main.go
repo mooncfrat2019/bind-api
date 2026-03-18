@@ -950,7 +950,7 @@ func main() {
 
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = ":8080"
+		port = ":9002"
 	}
 
 	log.Printf("BIND Manager API запущен на порту %s", port)
