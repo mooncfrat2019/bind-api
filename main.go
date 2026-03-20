@@ -2,10 +2,15 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,20 +30,34 @@ import (
 
 // --- Глобальные переменные ---
 var (
-	ZoneDir        string
-	ZoneConfFile   string
-	NamedConf      string
-	DbHost         string
-	DbPort         string
-	DbUser         string
-	DbPassword     string
-	DbName         string
-	DbSSLMode      string
-	DbURL          string
-	DbSchema       string
-	db             *gorm.DB
-	jobQueue       chan *Job
-	jobQueueMutex  sync.Mutex
+	// Конфигурация
+	ZoneDir      string
+	ZoneConfFile string
+	NamedConf    string
+	DbHost       string
+	DbPort       string
+	DbUser       string
+	DbPassword   string
+	DbName       string
+	DbSSLMode    string
+	DbSchema     string
+	DbURL        string
+
+	// Роль сервера
+	appRole string
+
+	// База данных (только MASTER)
+	db *gorm.DB
+
+	// Синхронизация
+	syncHandler *SyncHandler // Только MASTER
+	replicaSync *ReplicaSync // Только REPLICA
+
+	// Очередь заданий (только MASTER)
+	jobQueue      chan *Job
+	jobQueueMutex sync.Mutex
+
+	// Блокировки файлов
 	fileLocks      = make(map[string]*sync.Mutex)
 	fileLocksMutex sync.Mutex
 )
@@ -50,16 +69,16 @@ const (
 	DefaultNamedConf    = "/etc/named.conf"
 	DefaultDbHost       = "localhost"
 	DefaultDbPort       = "5432"
-	DefaultDbUser       = "dns"
-	DefaultDbName       = "dns"
+	DefaultDbUser       = "bindapi"
+	DefaultDbName       = "bind_api"
 	DefaultDbSSLMode    = "disable"
-	DefaultDbSchema     = "bind_api"
+	DefaultDbSchema     = "public"
 	DefaultTTL          = 3600
 	DefaultRefresh      = 3600
 	DefaultRetry        = 600
 	DefaultExpire       = 604800
 	DefaultNegative     = 3600
-	MaxQueueSize        = 1000
+	MaxQueueSize        = 100
 	WorkerTimeout       = 30 * time.Second
 )
 
@@ -78,13 +97,69 @@ type AuditLog struct {
 	CompletedAt *time.Time `json:"completed_at"`
 }
 
-// TableName указывает имя таблицы в БД
 func (AuditLog) TableName() string {
-	// ✅ Если схема не public, добавляем её к имени таблицы
 	if DbSchema != "" && DbSchema != "public" {
 		return fmt.Sprintf("%s.audit_logs", DbSchema)
 	}
 	return "audit_logs"
+}
+
+// SyncState модель для состояния синхронизации
+type SyncState struct {
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	FileType     string    `gorm:"type:varchar(50);not null;index" json:"file_type"`
+	FileName     string    `gorm:"type:varchar(500);not null;uniqueIndex" json:"file_name"`
+	ZoneName     string    `gorm:"type:varchar(255);index" json:"zone_name"`
+	Checksum     string    `gorm:"type:varchar(64);not null" json:"checksum"`
+	Version      int       `gorm:"not null" json:"version"`
+	Content      string    `gorm:"type:text" json:"content"`
+	LastModified time.Time `gorm:"not null" json:"last_modified"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+func (SyncState) TableName() string {
+	if DbSchema != "" && DbSchema != "public" {
+		return fmt.Sprintf("%s.sync_states", DbSchema)
+	}
+	return "sync_states"
+}
+
+// SyncStateData данные состояния для ответа реплике
+type SyncStateData struct {
+	Files     []SyncFileInfo `json:"files"`
+	Timestamp time.Time      `json:"timestamp"`
+}
+
+// SyncFileResp обёртка для ответа файла
+type SyncFileResp struct {
+	Success bool             `json:"success"`
+	Data    SyncFileResponse `json:"data"`
+}
+
+// ReplicaSyncStateResp ответ состояния для реплики
+type ReplicaSyncStateResp struct {
+	Success bool          `json:"success"`
+	Data    SyncStateData `json:"data"`
+}
+
+type SyncFileInfo struct {
+	FileType     string    `json:"file_type"`
+	FileName     string    `json:"file_name"`
+	ZoneName     string    `json:"zone_name"`
+	Checksum     string    `json:"checksum"`
+	Version      int       `json:"version"`
+	LastModified time.Time `json:"last_modified"`
+}
+
+type SyncFileResponse struct {
+	FileType     string    `json:"file_type"`
+	FileName     string    `json:"file_name"`
+	ZoneName     string    `json:"zone_name"`
+	Checksum     string    `json:"checksum"`
+	Version      int       `json:"version"`
+	LastModified time.Time `json:"last_modified"`
+	Content      string    `json:"content"`
 }
 
 // --- Типы заданий ---
@@ -227,15 +302,21 @@ func initConfig() {
 		ZoneDir += "/"
 	}
 
-	log.Printf("Конфигурация: ZoneDir=%s, ZoneConfFile=%s, NamedConf=%s",
-		ZoneDir, ZoneConfFile, NamedConf)
-	log.Printf("PostgreSQL: Host=%s, Port=%s, User=%s, DB=%s Scheme=%s",
-		DbHost, DbPort, DbUser, DbName, DbSchema)
+	log.Printf("Конфигурация: ZoneDir=%s, ZoneConfFile=%s, NamedConf=%s", ZoneDir, ZoneConfFile, NamedConf)
+	if DbURL != "" || DbHost != "" {
+		log.Printf("PostgreSQL: Host=%s, Port=%s, User=%s, DB=%s, Schema=%s", DbHost, DbPort, DbUser, DbName, DbSchema)
+	}
 }
 
-// --- Инициализация БД с GORM ---
+// --- Инициализация БД (только MASTER) ---
 
 func initDatabase() error {
+	// На REPLICA пропускаем инициализацию БД
+	if appRole == "replica" {
+		log.Println("Роль REPLICA - база данных не инициализируется")
+		return nil
+	}
+
 	var err error
 	var dsn string
 
@@ -250,7 +331,6 @@ func initDatabase() error {
 
 	log.Printf("Подключение к PostgreSQL...")
 
-	// Пробуем подключиться с повторами
 	maxRetries := 5
 	for i := 0; i < maxRetries; i++ {
 		db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
@@ -262,7 +342,6 @@ func initDatabase() error {
 			continue
 		}
 
-		// Проверяем соединение
 		sqlDB, err := db.DB()
 		if err != nil {
 			log.Printf("Ошибка получения SQL DB: %v", err)
@@ -276,7 +355,6 @@ func initDatabase() error {
 			continue
 		}
 
-		// Настраиваем пул соединений
 		sqlDB.SetMaxOpenConns(25)
 		sqlDB.SetMaxIdleConns(5)
 		sqlDB.SetConnMaxLifetime(5 * time.Minute)
@@ -289,23 +367,24 @@ func initDatabase() error {
 		return fmt.Errorf("не удалось подключиться к PostgreSQL после %d попыток: %v", maxRetries, err)
 	}
 
-	// Автоматическая миграция моделей
+	// НЕ устанавливаем search_path - схема указывается в TableName()
+
 	log.Println("Выполнение миграций базы данных...")
-	if err := db.AutoMigrate(&AuditLog{}); err != nil {
+	if err := db.AutoMigrate(&AuditLog{}, &SyncState{}); err != nil {
 		return fmt.Errorf("ошибка миграции: %v", err)
 	}
 
-	log.Println("База данных PostgreSQL инициализирована (миграции выполнены)")
+	log.Println("База данных PostgreSQL инициализирована")
 	return nil
 }
+
+// --- Очередь заданий (только MASTER) ---
 
 func initJobQueue() {
 	jobQueue = make(chan *Job, MaxQueueSize)
 	go jobWorker()
 	log.Println("Очередь заданий инициализирована")
 }
-
-// --- Очередь заданий ---
 
 func jobWorker() {
 	for job := range jobQueue {
@@ -330,7 +409,7 @@ func processJob(job *Job) {
 	case JobDeleteRecord:
 		result = executeDeleteRecord(job)
 	case JobReload:
-		result = executeReload(job)
+		result = executeReload()
 	default:
 		result = JobResult{Success: false, Error: fmt.Errorf("неизвестный тип задания")}
 	}
@@ -356,7 +435,6 @@ func submitJob(job *Job) (*JobResult, error) {
 	job.ResponseCh = make(chan JobResult, 1)
 	job.CreatedAt = time.Now()
 
-	// Получаем последний ID через GORM
 	var lastID uint
 	db.Model(&AuditLog{}).Select("COALESCE(MAX(id), 0)").Scan(&lastID)
 	job.ID = int64(lastID) + 1
@@ -374,7 +452,7 @@ func submitJob(job *Job) (*JobResult, error) {
 	}
 }
 
-// --- Аудит с GORM ---
+// --- Аудит (только MASTER) ---
 
 func logAudit(job *Job, status string, errMsg string) {
 	audit := AuditLog{
@@ -957,7 +1035,7 @@ func removeZoneFromConfig(configFile, zoneName string) error {
 	return nil
 }
 
-// --- Выполнители заданий ---
+// --- Выполнители заданий (только MASTER) ---
 
 func getServerIPs() []string {
 	var ips []string
@@ -1107,6 +1185,13 @@ zone "%s" IN {
 		return JobResult{Success: false, Error: err}
 	}
 
+	// Обновляем состояние для синхронизации
+	if syncHandler != nil {
+		syncHandler.UpdateSyncState("named_conf", NamedConf, "", NamedConf, "api")
+		syncHandler.UpdateSyncState("zone_conf", ZoneConfFile, "", ZoneConfFile, "api")
+
+	}
+
 	return JobResult{
 		Success: true,
 		Message: fmt.Sprintf("Зона %s (%s) создана в %s", job.ZoneName, zoneType, targetConfigFile),
@@ -1155,6 +1240,12 @@ func executeDeleteZone(job *Job) JobResult {
 
 	if err := reloadBind(); err != nil {
 		return JobResult{Success: false, Error: err}
+	}
+
+	// Обновляем состояние для синхронизации
+	if syncHandler != nil {
+		syncHandler.UpdateSyncState("named_conf", NamedConf, "", NamedConf, "api")
+		syncHandler.UpdateSyncState("zone_conf", ZoneConfFile, "", ZoneConfFile, "api")
 	}
 
 	return JobResult{
@@ -1238,6 +1329,11 @@ func executeAddRecord(job *Job) JobResult {
 		return JobResult{Success: false, Error: err}
 	}
 
+	// Обновляем состояние для синхронизации
+	if syncHandler != nil {
+		syncHandler.UpdateSyncState("zone_file", zone.File, job.ZoneName, zone.File, "api")
+	}
+
 	return JobResult{Success: true, Message: "Запись добавлена"}
 }
 
@@ -1289,14 +1385,816 @@ func executeDeleteRecord(job *Job) JobResult {
 		return JobResult{Success: false, Error: err}
 	}
 
+	// Обновляем состояние для синхронизации
+	if syncHandler != nil {
+		syncHandler.UpdateSyncState("zone_file", zone.File, job.ZoneName, zone.File, "api")
+	}
+
 	return JobResult{Success: true, Message: "Запись удалена"}
 }
 
-func executeReload(job *Job) JobResult {
+func executeReload() JobResult {
 	if err := reloadBind(); err != nil {
 		return JobResult{Success: false, Error: err}
 	}
 	return JobResult{Success: true, Message: "BIND перезагружен"}
+}
+
+// --- Sync Handler (только MASTER) ---
+
+type SyncHandler struct {
+	db *gorm.DB
+}
+
+func NewSyncHandler(db *gorm.DB) *SyncHandler {
+	return &SyncHandler{db: db}
+}
+
+func (h *SyncHandler) syncAuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		token := c.GetHeader("X-Sync-Token")
+		expectedToken := os.Getenv("SYNC_API_TOKEN")
+
+		if token == "" || token != expectedToken {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"success": false,
+				"message": "Неверный токен синхронизации",
+			})
+			c.Abort()
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// GetSyncFileByQuery получает файл по типу и имени через query-параметры
+func (h *SyncHandler) GetSyncFileByQuery(c *gin.Context) {
+	fileType := c.Query("type")
+	fileName := c.Query("name")
+
+	if fileType == "" || fileName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "Отсутствуют параметры type или name",
+		})
+		return
+	}
+
+	log.Printf("Запрос файла (query): type=%s, name=%s", fileType, fileName)
+
+	var state SyncState
+	// Ищем точно по имени файла
+	if err := h.db.Where("file_type = ? AND file_name = ?", fileType, fileName).
+		First(&state).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"message": "Файл не найден",
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Файл получен",
+		"data": SyncFileResponse{
+			FileType:     state.FileType,
+			FileName:     state.FileName,
+			ZoneName:     state.ZoneName,
+			Checksum:     state.Checksum,
+			Version:      state.Version,
+			LastModified: state.LastModified,
+			Content:      state.Content,
+		},
+	})
+}
+
+func (h *SyncHandler) GetSyncState(c *gin.Context) {
+	var states []SyncState
+	if err := h.db.Find(&states).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "Ошибка получения состояния",
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	files := make([]SyncFileInfo, 0, len(states))
+	for _, state := range states {
+		files = append(files, SyncFileInfo{
+			FileType:     state.FileType,
+			FileName:     state.FileName,
+			ZoneName:     state.ZoneName,
+			Checksum:     state.Checksum,
+			Version:      state.Version,
+			LastModified: state.LastModified,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Состояние синхронизации",
+		"data": gin.H{
+			"files":       files,
+			"timestamp":   time.Now(),
+			"master_host": os.Getenv("MASTER_URL"),
+		},
+	})
+}
+
+func (h *SyncHandler) GetSyncFile(c *gin.Context) {
+	fileType := c.Param("fileType")
+	fileName := c.Param("fileName")
+
+	// URL-декодируем fileName
+	decodedFileName, err := url.QueryUnescape(fileName)
+	if err != nil {
+		decodedFileName = fileName
+	}
+
+	log.Printf("Запрос файла: type=%s, name=%s (decoded: %s)", fileType, fileName, decodedFileName)
+
+	var state SyncState
+	if err := h.db.Where("file_type = ? AND file_name = ?", fileType, decodedFileName).
+		First(&state).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"message": "Файл не найден",
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Файл получен",
+		"data": SyncFileResponse{
+			FileType:     state.FileType,
+			FileName:     state.FileName,
+			ZoneName:     state.ZoneName,
+			Checksum:     state.Checksum,
+			Version:      state.Version,
+			LastModified: state.LastModified,
+			Content:      state.Content,
+		},
+	})
+}
+
+func (h *SyncHandler) GetSyncZones(c *gin.Context) {
+	var states []SyncState
+	if err := h.db.Where("file_type = ?", "zone_file").Find(&states).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "Ошибка получения зон",
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Список зон",
+		"data": gin.H{
+			"zones":     states,
+			"timestamp": time.Now(),
+		},
+	})
+}
+
+func (h *SyncHandler) GetSyncZone(c *gin.Context) {
+	zoneName := c.Param("zoneName")
+
+	var state SyncState
+	if err := h.db.Where("file_type = ? AND zone_name = ?", "zone_file", zoneName).
+		First(&state).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"message": "Зона не найдена",
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Зона получена",
+		"data": SyncFileResponse{
+			FileType:     state.FileType,
+			FileName:     state.FileName,
+			ZoneName:     state.ZoneName,
+			Checksum:     state.Checksum,
+			Version:      state.Version,
+			LastModified: state.LastModified,
+			Content:      state.Content,
+		},
+	})
+}
+
+func (h *SyncHandler) GetSyncFileQuery(c *gin.Context) {
+	fileType := c.Query("type")
+	fileName := c.Query("name")
+
+	log.Printf("Запрос файла (query): type=%s, name=%s", fileType, fileName)
+
+	var state SyncState
+	if err := h.db.Where("file_type = ? AND file_name = ?", fileType, fileName).
+		First(&state).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"message": "Файл не найден",
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Файл получен",
+		"data": SyncFileResponse{
+			FileType:     state.FileType,
+			FileName:     state.FileName,
+			ZoneName:     state.ZoneName,
+			Checksum:     state.Checksum,
+			Version:      state.Version,
+			LastModified: state.LastModified,
+			Content:      state.Content,
+		},
+	})
+}
+
+func (h *SyncHandler) UpdateSyncState(fileType, fileName, zoneName, filePath, changedBy string) error {
+	//  НЕ сохраняем zone_file - BIND сам передаст через AXFR
+	if fileType == "zone_file" {
+		log.Printf("⏭️ Пропускаем zone_file %s (BIND zone transfer)", zoneName)
+		return nil
+	}
+
+	//  Сохраняем только named_conf и zone_conf
+	if fileType != "named_conf" && fileType != "zone_conf" {
+		log.Printf("⏭️ Неизвестный тип файла: %s", fileType)
+		return nil
+	}
+
+	checksum, err := calculateChecksum(filePath)
+	if err != nil {
+		return fmt.Errorf("ошибка вычисления checksum: %v", err)
+	}
+
+	content, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("ошибка чтения файла: %v", err)
+	}
+
+	var lastState SyncState
+	result := h.db.Where("file_type = ? AND file_name = ?", fileType, fileName).
+		Order("version DESC").
+		First(&lastState)
+
+	newVersion := 1
+	if result.Error == nil {
+		if lastState.Checksum == checksum {
+			log.Printf("Checksum не изменился для %s, пропускаем обновление", fileName)
+			return nil
+		}
+		newVersion = lastState.Version + 1
+	}
+
+	state := SyncState{
+		FileType:     fileType,
+		FileName:     fileName,
+		ZoneName:     zoneName,
+		Checksum:     checksum,
+		Version:      newVersion,
+		Content:      string(content),
+		LastModified: time.Now(),
+	}
+
+	if result.Error == nil {
+		state.ID = lastState.ID
+		return h.db.Save(&state).Error
+	} else {
+		return h.db.Create(&state).Error
+	}
+}
+
+func calculateChecksum(filePath string) (string, error) {
+	// Проверяем существование файла
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return "", nil // Возвращаем пустую строку без ошибки (файл не существует)
+	}
+
+	content, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.Sum256(content)
+	return hex.EncodeToString(hash[:]), nil
+}
+
+// --- Replica Sync Client (только REPLICA) ---
+
+type StringReplacement struct {
+	Pattern     string
+	Replacement string
+	regex       *regexp.Regexp
+}
+
+type ConfigTransform struct {
+	MasterIP            string
+	ZoneType            string
+	ZoneSubdir          string
+	RemoveAllowTransfer bool
+	AllowTransfer       string
+	Replacements        []StringReplacement
+}
+
+type ReplicaSync struct {
+	MasterURL         string
+	APIToken          string
+	Interval          time.Duration
+	Enabled           bool
+	Transform         ConfigTransform
+	httpClient        *http.Client
+	mu                sync.Mutex
+	isSyncing         bool
+	lastSyncTime      time.Time
+	filesUpdatedCount int
+}
+
+func NewReplicaSync(masterURL, apiToken string, intervalSeconds int, enabled bool) *ReplicaSync {
+	transform := ConfigTransform{
+		MasterIP:            os.Getenv("REPLICA_MASTER_IP"),
+		ZoneType:            os.Getenv("REPLICA_ZONE_TYPE"),
+		ZoneSubdir:          os.Getenv("REPLICA_ZONE_SUBDIR"),
+		RemoveAllowTransfer: os.Getenv("REPLICA_REMOVE_ALLOW_TRANSFER") == "true",
+		AllowTransfer:       os.Getenv("REPLICA_ALLOW_TRANSFER"),
+	}
+
+	if transform.MasterIP == "" {
+		transform.MasterIP = "127.0.0.1"
+	}
+	if transform.ZoneType == "" {
+		transform.ZoneType = "slave"
+	}
+
+	if replacements := os.Getenv("REPLICA_CONFIG_REPLACEMENTS"); replacements != "" {
+		for _, repl := range strings.Split(replacements, "|") {
+			parts := strings.SplitN(repl, ":", 2)
+			if len(parts) == 2 {
+				sr := StringReplacement{
+					Pattern:     parts[0],
+					Replacement: parts[1],
+				}
+				sr.regex = regexp.MustCompile(regexp.QuoteMeta(sr.Pattern))
+				transform.Replacements = append(transform.Replacements, sr)
+			}
+		}
+	}
+
+	return &ReplicaSync{
+		MasterURL:  masterURL,
+		APIToken:   apiToken,
+		Interval:   time.Duration(intervalSeconds) * time.Second,
+		Enabled:    enabled,
+		Transform:  transform,
+		httpClient: &http.Client{Timeout: 30 * time.Second},
+	}
+}
+
+func (r *ReplicaSync) Start() {
+	if !r.Enabled {
+		log.Println("Синхронизация с мастером отключена")
+		return
+	}
+
+	log.Printf("Запуск синхронизации с мастером %s (интервал: %v)", r.MasterURL, r.Interval)
+
+	go func() {
+		ticker := time.NewTicker(r.Interval)
+		defer ticker.Stop()
+
+		r.sync()
+
+		for range ticker.C {
+			r.sync()
+		}
+	}()
+}
+
+func (r *ReplicaSync) sync() {
+	r.mu.Lock()
+	if r.isSyncing {
+		r.mu.Unlock()
+		log.Println("Синхронизация уже выполняется, пропускаем")
+		return
+	}
+	r.isSyncing = true
+	r.mu.Unlock()
+
+	defer func() {
+		r.mu.Lock()
+		r.isSyncing = false
+		r.mu.Unlock()
+	}()
+
+	log.Println("=== Начало синхронизации с мастером ===")
+	startTime := time.Now()
+
+	masterState, err := r.getMasterState()
+	if err != nil {
+		log.Printf("❌ Ошибка получения состояния с мастера: %v", err)
+		return
+	}
+
+	log.Printf("Получено состояние %d файлов с мастера", len(masterState.Data.Files))
+
+	changedFiles := 0
+	for _, fileInfo := range masterState.Data.Files {
+		changed, err := r.syncFile(fileInfo)
+		if err != nil {
+			log.Printf("❌ Ошибка синхронизации файла %s: %v", fileInfo.FileName, err)
+			continue
+		}
+		if changed {
+			changedFiles++
+			log.Printf("✓ Обновлён: %s (версия %d)", fileInfo.FileName, fileInfo.Version)
+		}
+	}
+
+	r.mu.Lock()
+	r.lastSyncTime = time.Now()
+	r.filesUpdatedCount += changedFiles
+	r.mu.Unlock()
+
+	elapsed := time.Since(startTime)
+	log.Printf("=== Синхронизация завершена за %v: обновлено %d файлов ===", elapsed, changedFiles)
+
+	if changedFiles > 0 {
+		if err := r.reloadBIND(); err != nil {
+			log.Printf("❌ Ошибка перезагрузки BIND: %v", err)
+		} else {
+			log.Println("✓ BIND перезапущен успешно")
+		}
+	}
+}
+
+func (r *ReplicaSync) getMasterState() (*ReplicaSyncStateResp, error) {
+	req, err := http.NewRequest("GET", r.MasterURL+"/api/sync/state", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("X-Sync-Token", r.APIToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка запроса к мастеру: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := ioutil.ReadAll(resp.Body)
+		return nil, fmt.Errorf("ошибка ответа мастера: %d - %s", resp.StatusCode, string(body))
+	}
+
+	var state ReplicaSyncStateResp
+	if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {
+		return nil, fmt.Errorf("ошибка парсинга ответа: %v", err)
+	}
+
+	return &state, nil
+}
+
+func (r *ReplicaSync) saveFileAlreadyTransformed(filePath, content string) error {
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("ошибка создания директории: %v", err)
+	}
+
+	tmpPath := filePath + ".tmp"
+	if err := ioutil.WriteFile(tmpPath, []byte(content), 0640); err != nil {
+		return fmt.Errorf("ошибка записи файла: %v", err)
+	}
+
+	// Проверяем синтаксис
+	checkCmd := fmt.Sprintf("named-checkconf %s", tmpPath)
+	cmd := exec.Command("bash", "-c", checkCmd)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("ошибка синтаксиса: %s - %v", string(output), err)
+	}
+
+	if err := os.Rename(tmpPath, filePath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("ошибка переименования: %v", err)
+	}
+
+	// Устанавливаем права
+	exec.Command("chown", "root:named", filePath).Run()
+	exec.Command("chmod", "640", filePath).Run()
+
+	return nil
+}
+
+func (r *ReplicaSync) syncConfigFile(fileInfo SyncFileInfo, localPath string) (bool, error) {
+	log.Printf("📥 Проверка конфига %s", fileInfo.FileName)
+
+	// 1. Скачиваем контент с мастера
+	fileContent, err := r.downloadFile(fileInfo)
+	if err != nil {
+		return false, err
+	}
+
+	// 2. Применяем трансформации
+	transformedContent := r.transformConfig(fileContent, fileInfo)
+
+	// 3. Считаем checksum ТРАНСФОРМИРОВАННОГО контента
+	transformedChecksum := sha256.Sum256([]byte(transformedContent))
+	transformedChecksumHex := hex.EncodeToString(transformedChecksum[:])
+
+	// 4. Считаем checksum ЛОКАЛЬНОГО файла (если существует)
+	localChecksum, err := calculateChecksum(localPath)
+	fileExists := err == nil && localChecksum != ""
+
+	// 5. Сравниваем checksum трансформированного контента с локальным
+	if fileExists && localChecksum == transformedChecksumHex {
+		log.Printf("✓ Конфиг %s не изменился (после трансформации)", fileInfo.FileName)
+		return false, nil
+	}
+
+	log.Printf("📝 Конфиг %s изменился, записываем...", fileInfo.FileName)
+
+	// 6. Записываем только если отличается
+	if err := r.saveFileAlreadyTransformed(localPath, transformedContent); err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
+func (r *ReplicaSync) syncFile(fileInfo SyncFileInfo) (bool, error) {
+	localPath := r.getLocalPath(fileInfo)
+
+	// Для конфигов — сначала скачиваем и трансформируем, потом сравниваем
+	if fileInfo.FileType == "named_conf" || fileInfo.FileType == "zone_conf" {
+		return r.syncConfigFile(fileInfo, localPath)
+	}
+
+	// Для остальных файлов — старая логика (сравнение до скачивания)
+	localChecksum, err := calculateChecksum(localPath)
+	fileExists := err == nil && localChecksum != ""
+
+	if fileExists && localChecksum == fileInfo.Checksum {
+		log.Printf("✓ Файл %s не изменился", fileInfo.FileName)
+		return false, nil
+	}
+
+	log.Printf("📥 Файл %s изменился", fileInfo.FileName)
+
+	fileContent, err := r.downloadFile(fileInfo)
+	if err != nil {
+		return false, err
+	}
+
+	if err := r.saveFile(localPath, fileContent, fileInfo); err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
+func (r *ReplicaSync) downloadFile(fileInfo SyncFileInfo) (string, error) {
+	var url1 string
+	if fileInfo.FileType == "zone_file" {
+		url1 = fmt.Sprintf("%s/api/sync/zone/%s", r.MasterURL, fileInfo.ZoneName)
+	} else {
+		url1 = fmt.Sprintf("%s/api/sync/file?type=%s&name=%s",
+			r.MasterURL,
+			fileInfo.FileType,
+			url.QueryEscape(fileInfo.FileName))
+	}
+
+	req, err := http.NewRequest("GET", url1, nil)
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("X-Sync-Token", r.APIToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("ошибка загрузки файла: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := ioutil.ReadAll(resp.Body)
+		return "", fmt.Errorf("ошибка ответа мастера: %d - %s", resp.StatusCode, string(body))
+	}
+
+	var fileResp SyncFileResp
+	if err := json.NewDecoder(resp.Body).Decode(&fileResp); err != nil {
+		return "", fmt.Errorf("ошибка парсинга ответа: %v", err)
+	}
+
+	return fileResp.Data.Content, nil
+}
+
+func (r *ReplicaSync) getLocalPath(fileInfo SyncFileInfo) string {
+	zoneDir := os.Getenv("BIND_ZONE_DIR")
+	if zoneDir == "" {
+		zoneDir = "/var/named/"
+	}
+
+	switch fileInfo.FileType {
+	case "named_conf":
+		return os.Getenv("BIND_NAMED_CONF")
+	case "zone_conf":
+		return os.Getenv("BIND_ZONE_CONF")
+	case "zone_file":
+		return filepath.Join(zoneDir, filepath.Base(fileInfo.FileName))
+	default:
+		return filepath.Join(zoneDir, fileInfo.FileName)
+	}
+}
+
+func (r *ReplicaSync) saveFile(filePath, content string, fileInfo SyncFileInfo) error {
+	// Применяем трансформации если это конфиг
+	if fileInfo.FileType == "named_conf" || fileInfo.FileType == "zone_conf" {
+		content = r.transformConfig(content, fileInfo)
+	}
+
+	// ПРОВЕРКА БАЛАНСА СКОБОК
+	openBraces := strings.Count(content, "{")
+	closeBraces := strings.Count(content, "}")
+	if openBraces != closeBraces {
+		return fmt.Errorf("нарушен баланс скобок: {=%d, }=%d", openBraces, closeBraces)
+	}
+
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("ошибка создания директории: %v", err)
+	}
+
+	tmpPath := filePath + ".tmp"
+	if err := ioutil.WriteFile(tmpPath, []byte(content), 0640); err != nil {
+		return fmt.Errorf("ошибка записи файла: %v", err)
+	}
+
+	// Проверяем синтаксис
+	var checkCmd string
+	if filepath.Ext(filePath) == ".zone" || filepath.Ext(filePath) == ".rev" {
+		zoneName := filepath.Base(filePath)
+		checkCmd = fmt.Sprintf("named-checkzone %s %s", zoneName, tmpPath)
+	} else {
+		checkCmd = fmt.Sprintf("named-checkconf %s", tmpPath)
+	}
+
+	cmd := exec.Command("bash", "-c", checkCmd)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("ошибка синтаксиса: %s - %v", string(output), err)
+	}
+
+	if err := os.Rename(tmpPath, filePath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("ошибка переименования: %v", err)
+	}
+
+	// Устанавливаем права
+	if filepath.Ext(filePath) == ".zone" || filepath.Ext(filePath) == ".rev" {
+		exec.Command("chown", "named:named", filePath).Run()
+		exec.Command("chmod", "644", filePath).Run()
+	} else {
+		exec.Command("chown", "root:named", filePath).Run()
+		exec.Command("chmod", "640", filePath).Run()
+	}
+
+	return nil
+}
+
+func (r *ReplicaSync) transformConfig(content string, fileInfo SyncFileInfo) string {
+	log.Printf("Применение трансформаций к %s", fileInfo.FileName)
+
+	// 1. Трансформация блока options
+	content = r.transformOptionsBlock(content)
+
+	// 2. УДАЛЯЕМ allow-update и allow-transfer ИЗ ВСЕГО ФАЙЛА (до трансформации зон)
+	// Это гарантирует удаление даже если структура нестандартная
+	content = regexp.MustCompile(`(?s)allow-update\s*\{[^}]*\}\s*;`).ReplaceAllString(content, "")
+	content = regexp.MustCompile(`(?s)allow-transfer\s*\{[^}]*\}\s*;`).ReplaceAllString(content, "")
+
+	// 3. Трансформация блоков зон (только type, masters, file)
+	content = r.transformZoneBlocks(content)
+
+	// 4. Чистка дублирующихся точек с запятой (на случай если что-то пошло не так)
+	content = strings.ReplaceAll(content, ";;", ";")
+
+	// 5. Чистка лишних пустых строк
+	content = regexp.MustCompile(`\n{3,}`).ReplaceAllString(content, "\n\n")
+
+	log.Printf("Трансформации применены к %s", fileInfo.FileName)
+	//log.Printf("Content: \n%s", content)
+	return content
+}
+
+func (r *ReplicaSync) transformOptionsBlock(content string) string {
+	// 1. Отключаем IPv6
+	if os.Getenv("REPLICA_DISABLE_IPV6") == "true" {
+		content = regexp.MustCompile(`(?m)^\s*listen-on-v6\s+port\s+\d+\s*\{\s*any\s*;\s*\}\s*;`).
+			ReplaceAllString(content, "listen-on-v6 port 53 { none; };")
+	}
+
+	// 2. Удаляем also-notify
+	content = regexp.MustCompile(`(?s)also-notify\s*\{[^}]*\}\s*;`).ReplaceAllString(content, "")
+
+	return content
+}
+
+func (r *ReplicaSync) transformZoneBlocks(content string) string {
+	zoneRegex := regexp.MustCompile(`(?s)zone\s+"([^"]+)"\s+(?:IN\s+)?\{([^}]+)\}`)
+
+	return zoneRegex.ReplaceAllStringFunc(content, func(match string) string {
+		submatch := zoneRegex.FindStringSubmatch(match)
+		if len(submatch) < 3 {
+			return match
+		}
+
+		zoneName := submatch[1]
+		zoneBody := submatch[2]
+
+		// Пропускаем специальные зоны
+		if zoneName == "." || zoneName == "localhost" || strings.HasPrefix(zoneName, "_") {
+			return match
+		}
+
+		transformedBody := r.transformZoneBody(zoneBody)
+
+		return fmt.Sprintf(`zone "%s" IN {
+%s
+};`, zoneName, transformedBody)
+	})
+}
+
+func (r *ReplicaSync) transformZoneBody(body string) string {
+	// 1. Меняем type master на type slave
+	body = regexp.MustCompile(`(?m)^\s*type\s+master\s*;`).ReplaceAllString(body, fmt.Sprintf("type %s;", r.Transform.ZoneType))
+
+	// 2. Добавляем masters {}
+	if r.Transform.ZoneType == "slave" && r.Transform.MasterIP != "" {
+		if !regexp.MustCompile(`(?m)^\s*masters\s*\{`).MatchString(body) {
+			body = regexp.MustCompile(`(type\s+\w+\s*;)`).ReplaceAllString(body,
+				fmt.Sprintf("$1\n         masters { %s; };", r.Transform.MasterIP))
+		}
+	}
+
+	// 3. Меняем путь к файлу
+	if r.Transform.ZoneSubdir != "" {
+		body = regexp.MustCompile(`file\s+"([^/"][^"]*\.zone[^"]*)"`).ReplaceAllStringFunc(body, func(match string) string {
+			submatch := regexp.MustCompile(`file\s+"([^"]+)"`).FindStringSubmatch(match)
+			if len(submatch) < 2 {
+				return match
+			}
+			filePath := submatch[1]
+			if strings.Contains(filePath, "/") || strings.Contains(filePath, r.Transform.ZoneSubdir) {
+				return match
+			}
+			return fmt.Sprintf(`file "%s/%s"`, r.Transform.ZoneSubdir, filePath)
+		})
+	}
+
+	return body
+}
+
+func (r *ReplicaSync) reloadBIND() error {
+	cmd := exec.Command("rndc", "reload")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		cmd = exec.Command("systemctl", "reload", "named")
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("ошибка перезагрузки BIND: %s - %v", string(output), err)
+		}
+	}
+	return nil
+}
+
+func (r *ReplicaSync) GetLastSyncTime() time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastSyncTime
+}
+
+func (r *ReplicaSync) GetFilesUpdatedCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.filesUpdatedCount
 }
 
 // --- Handlers ---
@@ -1310,16 +2208,25 @@ func handleStatus(c *gin.Context) {
 		status = "active"
 	}
 
-	// Проверка подключения к БД
-	sqlDB, _ := db.DB()
-	dbConnected := sqlDB.Ping() == nil
-
-	sendResponse(c, http.StatusOK, true, "Статус сервиса", gin.H{
+	response := gin.H{
 		"named_status": status,
 		"api_version":  "1.0.0",
-		"queue_size":   len(jobQueue),
-		"db_connected": dbConnected,
-	})
+		"role":         appRole,
+	}
+
+	if appRole == "master" {
+		sqlDB, _ := db.DB()
+		response["db_connected"] = sqlDB.Ping() == nil
+		response["queue_size"] = len(jobQueue)
+	} else {
+		response["master_url"] = os.Getenv("MASTER_URL")
+		if replicaSync != nil {
+			response["last_sync"] = replicaSync.GetLastSyncTime()
+			response["sync_enabled"] = replicaSync.Enabled
+		}
+	}
+
+	sendResponse(c, http.StatusOK, true, "Статус сервиса", response)
 }
 
 func handleConfig(c *gin.Context) {
@@ -1331,6 +2238,7 @@ func handleConfig(c *gin.Context) {
 		"named_conf":  NamedConf,
 		"db_host":     DbHost,
 		"db_name":     DbName,
+		"db_schema":   DbSchema,
 		"default_ttl": DefaultTTL,
 		"api_port":    os.Getenv("API_PORT"),
 		"gin_mode":    gin.Mode(),
@@ -1549,7 +2457,6 @@ func handleAuditLog(c *gin.Context) {
 	status := c.Query("status")
 	jobType := c.Query("job_type")
 
-	// Построение запроса с GORM
 	query := db.Model(&AuditLog{})
 
 	if zoneName != "" {
@@ -1572,20 +2479,39 @@ func handleAuditLog(c *gin.Context) {
 }
 
 func handleAuditStats(c *gin.Context) {
-	// Статистика с GORM
-	var total int64
-	var completed int64
-	var failed int64
+	var total, completed, failed int64
 
 	db.Model(&AuditLog{}).Count(&total)
 	db.Model(&AuditLog{}).Where("status = ?", "COMPLETED").Count(&completed)
 	db.Model(&AuditLog{}).Where("status = ?", "FAILED").Count(&failed)
 
+	successRate := float64(0)
+	if total > 0 {
+		successRate = float64(completed) / float64(total) * 100
+	}
+
 	sendResponse(c, http.StatusOK, true, "Статистика аудита", gin.H{
 		"total":        total,
 		"completed":    completed,
 		"failed":       failed,
-		"success_rate": float64(completed) / float64(total) * 100,
+		"success_rate": successRate,
+	})
+}
+
+func handleReplicaStatus(c *gin.Context) {
+	sendResponse(c, http.StatusOK, true, "REPLICA статус", gin.H{
+		"role":          "replica",
+		"master_url":    os.Getenv("MASTER_URL"),
+		"sync_interval": os.Getenv("SYNC_INTERVAL"),
+		"last_sync":     replicaSync.GetLastSyncTime(),
+		"sync_enabled":  replicaSync.Enabled,
+	})
+}
+
+func handleReplicaLastUpdate(c *gin.Context) {
+	sendResponse(c, http.StatusOK, true, "Последнее обновление", gin.H{
+		"last_sync":     replicaSync.GetLastSyncTime(),
+		"files_updated": replicaSync.GetFilesUpdatedCount(),
 	})
 }
 
@@ -1603,24 +2529,55 @@ func loggerMiddleware() gin.HandlerFunc {
 }
 
 func main() {
-	// Загрузка переменных из .env
+	// Загрузка .env
 	if err := godotenv.Load(); err != nil {
-		log.Println("WARNING: .env файл не найден, используем переменные окружения")
+		log.Println("WARNING: .env файл не найден")
 	}
+
 	initConfig()
 
+	// Определяем роль
+	appRole = os.Getenv("APP_ROLE")
+	if appRole == "" {
+		appRole = "master"
+	}
+	log.Printf("=== РОЛЬ СЕРВЕРА: %s ===", strings.ToUpper(appRole))
+
+	// Инициализация БД (только MASTER)
 	if err := initDatabase(); err != nil {
 		log.Fatalf("Ошибка инициализации БД: %v", err)
 	}
 
-	initJobQueue()
+	// Инициализация обработчика синхронизации (только MASTER)
+	if appRole == "master" {
+		syncHandler = NewSyncHandler(db)
+		log.Println("✓ Синхронизация MASTER инициализирована")
 
-	if os.Geteuid() != 0 {
-		log.Println("WARNING: Сервис запущен не от root. Возможны ошибки записи в системные директории")
+		initJobQueue()
+		log.Println("✓ Очередь заданий инициализирована")
 	}
 
+	// Инициализация клиента синхронизации (только REPLICA)
+	if appRole == "replica" {
+		masterURL := os.Getenv("MASTER_URL")
+		apiToken := os.Getenv("MASTER_API_TOKEN")
+		syncInterval := 30
+		if val := os.Getenv("SYNC_INTERVAL"); val != "" {
+			syncInterval, _ = strconv.Atoi(val)
+		}
+
+		if masterURL == "" {
+			log.Fatal("ERROR: MASTER_URL не указан для REPLICA")
+		}
+
+		replicaSync = NewReplicaSync(masterURL, apiToken, syncInterval, true)
+		replicaSync.Start()
+		log.Println("✓ Синхронизация REPLICA запущена")
+	}
+
+	// Проверка BIND
 	if _, err := exec.LookPath("rndc"); err != nil {
-		log.Fatal("Утилита rndc не найдена в PATH. Установите bind-utils")
+		log.Fatal("Утилита rndc не найдена в PATH")
 	}
 
 	if _, err := os.Stat(ZoneDir); os.IsNotExist(err) {
@@ -1636,19 +2593,37 @@ func main() {
 	api := r.Group("/api")
 	{
 		api.GET("/status", handleStatus)
-		api.GET("/config", handleConfig)
-		api.GET("/audit", handleAuditLog)
-		api.GET("/audit/stats", handleAuditStats)
-		api.POST("/reload", handleReload)
-		api.GET("/zones", handleListZones)
-		api.POST("/zone", handleCreateZone)
 
-		zones := api.Group("/zone/:name")
-		{
-			zones.GET("", handleGetZone)
-			zones.DELETE("", handleDeleteZone)
-			zones.POST("/record", handleAddRecord)
-			zones.DELETE("/record/:record/:type", handleDeleteRecord)
+		// Endpoints для синхронизации (ТОЛЬКО MASTER)
+		if appRole == "master" {
+			sync0 := api.Group("/sync", syncHandler.syncAuthMiddleware())
+			{
+				sync0.GET("/state", syncHandler.GetSyncState)
+				sync0.GET("/state/:fileType/:fileName", syncHandler.GetSyncFile)
+				sync0.GET("/zones", syncHandler.GetSyncZones)
+				sync0.GET("/zone/:zoneName", syncHandler.GetSyncZone)
+				sync0.GET("/file", syncHandler.GetSyncFileQuery)
+			}
+
+			// Обычные API endpoints (ТОЛЬКО MASTER)
+			api.GET("/config", handleConfig)
+			api.GET("/audit", handleAuditLog)
+			api.GET("/audit/stats", handleAuditStats)
+			api.POST("/reload", handleReload)
+			api.GET("/zones", handleListZones)
+			api.POST("/zone", handleCreateZone)
+
+			zones := api.Group("/zone/:name")
+			{
+				zones.GET("", handleGetZone)
+				zones.DELETE("", handleDeleteZone)
+				zones.POST("/record", handleAddRecord)
+				zones.DELETE("/record/:record/:type", handleDeleteRecord)
+			}
+		} else {
+			// REPLICA - только статус и информация о синхронизации
+			api.GET("/sync/status", handleReplicaStatus)
+			api.GET("/sync/last-update", handleReplicaLastUpdate)
 		}
 	}
 
@@ -1658,7 +2633,13 @@ func main() {
 	}
 
 	log.Printf("BIND Manager API запущен на порту %s", port)
-	log.Printf("Используемые пути: ZoneDir=%s, ZoneConfFile=%s, NamedConf=%s", ZoneDir, ZoneConfFile, NamedConf)
+	log.Printf("Режим: %s", appRole)
+
+	if appRole == "master" {
+		log.Printf("База данных: %s@%s:%s/%s", DbUser, DbHost, DbPort, DbName)
+	} else {
+		log.Printf("MASTER URL: %s", os.Getenv("MASTER_URL"))
+	}
 
 	if err := r.Run(port); err != nil {
 		log.Fatal(err)
