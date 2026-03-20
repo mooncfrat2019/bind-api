@@ -108,10 +108,10 @@ func (AuditLog) TableName() string {
 type SyncState struct {
 	ID           uint      `gorm:"primaryKey" json:"id"`
 	FileType     string    `gorm:"type:varchar(50);not null;index" json:"file_type"`
-	FileName     string    `gorm:"type:varchar(500);not null;uniqueIndex" json:"file_name"`
+	FileName     string    `gorm:"type:varchar(500);not null;index" json:"file_name"`
 	ZoneName     string    `gorm:"type:varchar(255);index" json:"zone_name"`
 	Checksum     string    `gorm:"type:varchar(64);not null" json:"checksum"`
-	Version      int       `gorm:"not null" json:"version"`
+	Version      int       `gorm:"not null;index" json:"version"`
 	Content      string    `gorm:"type:text" json:"content"`
 	LastModified time.Time `gorm:"not null" json:"last_modified"`
 	CreatedAt    time.Time `json:"created_at"`
@@ -1189,7 +1189,7 @@ zone "%s" IN {
 	if syncHandler != nil {
 		syncHandler.UpdateSyncState("named_conf", NamedConf, "", NamedConf, "api")
 		syncHandler.UpdateSyncState("zone_conf", ZoneConfFile, "", ZoneConfFile, "api")
-
+		syncHandler.UpdateSyncState("zone_file", zoneFile, job.ZoneName, zoneFile, "api")
 	}
 
 	return JobResult{
@@ -1624,43 +1624,27 @@ func (h *SyncHandler) GetSyncFileQuery(c *gin.Context) {
 	})
 }
 
-func (h *SyncHandler) UpdateSyncState(fileType, fileName, zoneName, filePath, changedBy string) error {
-	//  НЕ сохраняем zone_file - BIND сам передаст через AXFR
-	if fileType == "zone_file" {
-		log.Printf("⏭️ Пропускаем zone_file %s (BIND zone transfer)", zoneName)
-		return nil
-	}
-
-	//  Сохраняем только named_conf и zone_conf
-	if fileType != "named_conf" && fileType != "zone_conf" {
-		log.Printf("⏭️ Неизвестный тип файла: %s", fileType)
-		return nil
-	}
-
+func (h *SyncHandler) UpdateSyncState(fileType, fileName, zoneName, filePath, changedBy string) (uint, error) {
 	checksum, err := calculateChecksum(filePath)
 	if err != nil {
-		return fmt.Errorf("ошибка вычисления checksum: %v", err)
+		return 0, fmt.Errorf("ошибка вычисления checksum: %v", err)
 	}
 
 	content, err := ioutil.ReadFile(filePath)
 	if err != nil {
-		return fmt.Errorf("ошибка чтения файла: %v", err)
+		return 0, fmt.Errorf("ошибка чтения файла: %v", err)
 	}
 
-	var lastState SyncState
-	result := h.db.Where("file_type = ? AND file_name = ?", fileType, fileName).
-		Order("version DESC").
-		First(&lastState)
+	// Получаем последний номер версии для этого файла
+	var lastVersion int
+	h.db.Model(&SyncState{}).
+		Where("file_type = ? AND file_name = ?", fileType, fileName).
+		Select("COALESCE(MAX(version), 0)").
+		Scan(&lastVersion)
 
-	newVersion := 1
-	if result.Error == nil {
-		if lastState.Checksum == checksum {
-			log.Printf("Checksum не изменился для %s, пропускаем обновление", fileName)
-			return nil
-		}
-		newVersion = lastState.Version + 1
-	}
+	newVersion := lastVersion + 1
 
+	// Создаём НОВУЮ запись
 	state := SyncState{
 		FileType:     fileType,
 		FileName:     fileName,
@@ -1671,12 +1655,252 @@ func (h *SyncHandler) UpdateSyncState(fileType, fileName, zoneName, filePath, ch
 		LastModified: time.Now(),
 	}
 
-	if result.Error == nil {
-		state.ID = lastState.ID
-		return h.db.Save(&state).Error
-	} else {
-		return h.db.Create(&state).Error
+	// Создаём запись и получаем ID
+	if err := h.db.Create(&state).Error; err != nil {
+		return 0, fmt.Errorf("ошибка сохранения версии: %v", err)
 	}
+
+	log.Printf("Создана версия %d (ID=%d) для %s", newVersion, state.ID, fileName)
+
+	return state.ID, nil
+}
+
+// GetVersions возвращает список версий файла
+func (h *SyncHandler) GetVersions(c *gin.Context) {
+	fileType := c.Param("fileType")
+	fileName := c.Query("fileName")
+
+	decodedFileName, err := url.QueryUnescape(fileName)
+	if err != nil {
+		decodedFileName = fileName
+	}
+
+	limit := 50
+	if l := c.Query("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	var versions []SyncState
+	query := h.db.Where("file_type = ? AND file_name = ?", fileType, decodedFileName).
+		Order("version DESC").
+		Limit(limit)
+
+	if err := query.Find(&versions).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "Ошибка получения версий",
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	// Возвращаем ID в ответе
+	type VersionMeta struct {
+		ID           uint      `json:"id"`
+		Version      int       `json:"version"`
+		Checksum     string    `json:"checksum"`
+		LastModified time.Time `json:"last_modified"`
+		FileName     string    `json:"file_name"`
+	}
+
+	metas := make([]VersionMeta, 0, len(versions))
+	for _, v := range versions {
+		metas = append(metas, VersionMeta{
+			ID:           v.ID,
+			Version:      v.Version,
+			Checksum:     v.Checksum,
+			LastModified: v.LastModified,
+			FileName:     v.FileName,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Версии получены",
+		"data": gin.H{
+			"file_type": fileType,
+			"file_name": decodedFileName,
+			"versions":  metas,
+		},
+	})
+}
+
+// GetVersion возвращает конкретную версию файла
+func (h *SyncHandler) GetVersion(c *gin.Context) {
+	versionID := c.Param("id")
+
+	var state SyncState
+	if err := h.db.First(&state, versionID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"message": "Версия не найдена",
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Версия получена",
+		"data": gin.H{
+			"version":       state.Version,
+			"file_type":     state.FileType,
+			"file_name":     state.FileName,
+			"checksum":      state.Checksum,
+			"last_modified": state.LastModified,
+			"content":       state.Content,
+		},
+	})
+}
+
+// RollbackVersion откатывает файл к указанной версии
+func (h *SyncHandler) RollbackVersion(c *gin.Context) {
+	versionID := c.Param("id")
+	force := c.Query("force") == "true"
+
+	var state SyncState
+	if err := h.db.First(&state, versionID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"message": "Версия не найдена",
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	log.Printf("Откат версии %d для %s (type: %s)", state.Version, state.FileName, state.FileType)
+
+	// Блокируем файл
+	err := withFileLock(state.FileName, func() error {
+		// Записываем контент во временный файл
+		tmpPath := state.FileName + ".rollback.tmp"
+		if err := ioutil.WriteFile(tmpPath, []byte(state.Content), 0640); err != nil {
+			return fmt.Errorf("ошибка записи временного файла: %v", err)
+		}
+
+		// Проверяем синтаксис если не force
+		if !force {
+			var checkCmd string
+
+			// ВАЖНО: Для zone_file используем named-checkzone, для конфигов - named-checkconf
+			if state.FileType == "zone_file" {
+				// named-checkzone требует имя зоны и путь к файлу
+				checkCmd = fmt.Sprintf("named-checkzone %s %s", state.ZoneName, tmpPath)
+			} else {
+				// Для named_conf и zone_conf
+				checkCmd = fmt.Sprintf("named-checkconf %s", tmpPath)
+			}
+
+			cmd := exec.Command("bash", "-c", checkCmd)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				os.Remove(tmpPath)
+				return fmt.Errorf("ошибка синтаксиса: %s - %v", string(output), err)
+			}
+		}
+
+		// Переименовываем в целевой файл
+		if err := os.Rename(tmpPath, state.FileName); err != nil {
+			os.Remove(tmpPath)
+			return fmt.Errorf("ошибка переименования: %v", err)
+		}
+
+		// Восстанавливаем права
+		if state.FileType == "zone_file" {
+			exec.Command("chown", "named:named", state.FileName).Run()
+			exec.Command("chmod", "644", state.FileName).Run()
+		} else {
+			exec.Command("chown", "root:named", state.FileName).Run()
+			exec.Command("chmod", "640", state.FileName).Run()
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "Ошибка отката",
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	// Перезагружаем BIND
+	if err := reloadBind(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "Откат выполнен, но reload failed",
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	// Логируем операцию
+	audit := AuditLog{
+		JobType:   "ROLLBACK",
+		ZoneName:  state.ZoneName,
+		Status:    "COMPLETED",
+		CreatedAt: time.Now(),
+	}
+	db.Create(&audit)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": fmt.Sprintf("Откат к версии %d выполнен", state.Version),
+		"data": gin.H{
+			"version":   state.Version,
+			"file_name": state.FileName,
+			"file_type": state.FileType,
+			"checksum":  state.Checksum,
+		},
+	})
+}
+
+// DeleteVersion удаляет старую версию (очистка истории)
+func (h *SyncHandler) DeleteVersion(c *gin.Context) {
+	versionID := c.Param("id")
+
+	var state SyncState
+	if err := h.db.First(&state, versionID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"success": false,
+			"message": "Версия не найдена",
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	// Не удаляем последнюю версию
+	var latest SyncState
+	if err := h.db.Where("file_type = ? AND file_name = ?", state.FileType, state.FileName).
+		Order("version DESC").
+		First(&latest).Error; err == nil && latest.ID == state.ID {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "Нельзя удалить текущую версию",
+		})
+		return
+	}
+
+	if err := h.db.Delete(&state).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "Ошибка удаления версии",
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Версия удалена",
+		"data": gin.H{
+			"version": state.Version,
+		},
+	})
 }
 
 func calculateChecksum(filePath string) (string, error) {
@@ -1937,16 +2161,21 @@ func (r *ReplicaSync) syncConfigFile(fileInfo SyncFileInfo, localPath string) (b
 }
 
 func (r *ReplicaSync) syncFile(fileInfo SyncFileInfo) (bool, error) {
-	localPath := r.getLocalPath(fileInfo)
-
-	// Для конфигов — сначала скачиваем и трансформируем, потом сравниваем
-	if fileInfo.FileType == "named_conf" || fileInfo.FileType == "zone_conf" {
-		return r.syncConfigFile(fileInfo, localPath)
+	// Пропускаем zone_file — реплика получает зоны через BIND AXFR, не через API
+	if fileInfo.FileType == "zone_file" {
+		log.Printf("⏭️ Пропускаем зону %s (BIND zone transfer)", fileInfo.ZoneName)
+		return false, nil
 	}
 
-	// Для остальных файлов — старая логика (сравнение до скачивания)
+	// Для конфигов — специальная логика с трансформацией
+	if fileInfo.FileType == "named_conf" || fileInfo.FileType == "zone_conf" {
+		return r.syncConfigFile(fileInfo, r.getLocalPath(fileInfo))
+	}
+
+	// Для остальных файлов — стандартная логика
+	localPath := r.getLocalPath(fileInfo)
 	localChecksum, err := calculateChecksum(localPath)
-	fileExists := err == nil && localChecksum != ""
+	fileExists := (err == nil && localChecksum != "")
 
 	if fileExists && localChecksum == fileInfo.Checksum {
 		log.Printf("✓ Файл %s не изменился", fileInfo.FileName)
@@ -2603,6 +2832,12 @@ func main() {
 				sync0.GET("/zones", syncHandler.GetSyncZones)
 				sync0.GET("/zone/:zoneName", syncHandler.GetSyncZone)
 				sync0.GET("/file", syncHandler.GetSyncFileQuery)
+
+				// Работа с версиями
+				sync0.GET("/versions/:fileType", syncHandler.GetVersions)
+				sync0.GET("/version/:id", syncHandler.GetVersion)
+				sync0.POST("/version/:id/rollback", syncHandler.RollbackVersion)
+				sync0.DELETE("/version/:id", syncHandler.DeleteVersion)
 			}
 
 			// Обычные API endpoints (ТОЛЬКО MASTER)
