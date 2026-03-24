@@ -140,15 +140,28 @@ func InitDatabase() error {
 		break
 	}
 
+	log.Println("Выполнение миграций базы данных...")
+	if err := Db.AutoMigrate(&AuditLog{}, &SyncState{}, &APIKey{}); err != nil {
+		return fmt.Errorf("ошибка миграции: %v", err)
+	}
+
 	if err != nil {
 		return fmt.Errorf("не удалось подключиться к PostgreSQL после %d попыток: %v", maxRetries, err)
 	}
-
-	// НЕ устанавливаем search_path - схема указывается в TableName()
-
-	log.Println("Выполнение миграций базы данных...")
-	if err := Db.AutoMigrate(&AuditLog{}, &SyncState{}); err != nil {
-		return fmt.Errorf("ошибка миграции: %v", err)
+	var count int64
+	Db.Model(&APIKey{}).Count(&count)
+	if count == 0 {
+		permsJSON, _ := json.Marshal([]string{"*"})
+		defaultKey := &APIKey{
+			Name:        "default-admin",
+			Description: "⚠️ Дефолтный ключ — замените в продакшене!",
+			Permissions: string(permsJSON),
+		}
+		if err := Db.Create(defaultKey).Error; err != nil {
+			log.Printf("WARNING: Не удалось создать дефолтный API-ключ: %v", err)
+		} else {
+			log.Printf("⚠️  СОЗДАН ДЕФОЛТНЫЙ API-КЛЮЧ: %s", defaultKey.Key)
+		}
 	}
 
 	log.Println("База данных PostgreSQL инициализирована")
@@ -946,6 +959,7 @@ func NewSH(db *gorm.DB) *SyncHandler {
 
 func (h *SyncHandler) SyncAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		log.Println("SyncAuthMiddleware run")
 		token := c.GetHeader("X-Sync-Token")
 		expectedToken := os.Getenv("SYNC_API_TOKEN")
 
@@ -1875,4 +1889,69 @@ func (r *ReplicaSync) GetFilesUpdatedCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.filesUpdatedCount
+}
+
+// APIKeyAuth проверяет API-ключ и права доступа
+func APIKeyAuth(requiredPerm string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		apiKey := c.GetHeader("X-API-Key")
+		if apiKey == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"success": false,
+				"message": "Ошибка авторизации",
+			})
+			c.Abort()
+			return
+		}
+
+		var key APIKey
+		if err := Db.Where("key = ?", apiKey).First(&key).Error; err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"success": false,
+				"message": "Неверный API-ключ",
+			})
+			c.Abort()
+			return
+		}
+
+		if key.IsExpired() {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"success": false,
+				"message": "API-ключ истёк",
+			})
+			c.Abort()
+			return
+		}
+
+		if requiredPerm != "" && !key.HasPermission(requiredPerm) {
+			c.JSON(http.StatusForbidden, gin.H{
+				"success": false,
+				"message": "Недостаточно прав: требуется " + requiredPerm,
+			})
+			c.Abort()
+			return
+		}
+
+		if key.IPAddress != "" {
+			clientIP := c.ClientIP()
+			if clientIP != key.IPAddress {
+				c.JSON(http.StatusForbidden, gin.H{
+					"success": false,
+					"message": "Доступ запрещён с этого IP-адреса",
+				})
+				c.Abort()
+				return
+			}
+		}
+
+		go func(keyID uint) {
+			now := time.Now()
+			Db.Model(&APIKey{}).Where("id = ?", keyID).Update("last_used_at", now)
+		}(key.ID)
+
+		c.Set("api_key_id", key.ID)
+		c.Set("api_key_name", key.Name)
+
+		c.Next()
+	}
 }

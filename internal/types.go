@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -177,6 +178,23 @@ type StringReplacement struct {
 	regex       *regexp.Regexp
 }
 
+type CreateAPIKeyRequest struct {
+	Name        string   `json:"name" binding:"required,min=3,max=100"`
+	Description string   `json:"description"`
+	Permissions []string `json:"permissions" binding:"required,gt=0"`
+	IPAddress   string   `json:"ip_address"`
+	ExpiresIn   int      `json:"expires_in"`
+}
+
+type CreateAPIKeyResponse struct {
+	Key         string     `json:"key"`
+	Name        string     `json:"name"`
+	Permissions []string   `json:"permissions"`
+	IPAddress   string     `json:"ip_address"`
+	ExpiresAt   *time.Time `json:"expires_at"`
+	CreatedAt   time.Time  `json:"created_at"`
+}
+
 func (SyncState) TableName() string {
 	if DbSchema != "" && DbSchema != "public" {
 		return fmt.Sprintf("%s.sync_states", DbSchema)
@@ -189,4 +207,53 @@ func (AuditLog) TableName() string {
 		return fmt.Sprintf("%s.audit_logs", DbSchema)
 	}
 	return "audit_logs"
+}
+
+type APIKey struct {
+	ID          uint   `gorm:"primaryKey" json:"id"`
+	Key         string `gorm:"type:varchar(64);not null;uniqueIndex" json:"-"`
+	Name        string `gorm:"type:varchar(100);not null" json:"name"`
+	Description string `gorm:"type:text" json:"description"`
+
+	// ✅ ИСПРАВЛЕНО: используем jsonb вместо text[]
+	Permissions string `gorm:"type:jsonb" json:"permissions"`
+
+	IPAddress string     `gorm:"type:varchar(45)" json:"ip_address"`
+	ExpiresAt *time.Time `gorm:"index" json:"expires_at"`
+
+	LastUsedAt *time.Time `json:"last_used_at"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+}
+
+func (APIKey) TableName() string {
+	if DbSchema != "" && DbSchema != "public" {
+		return fmt.Sprintf("%s.api_keys", DbSchema)
+	}
+	return "api_keys"
+}
+
+// HasPermission проверяет наличие права
+func (k *APIKey) HasPermission(perm string) bool {
+	var perms []string
+	if err := json.Unmarshal([]byte(k.Permissions), &perms); err != nil {
+		return false
+	}
+	for _, p := range perms {
+		if p == perm || p == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+func (k *APIKey) IsExpired() bool {
+	return k.ExpiresAt != nil && time.Now().After(*k.ExpiresAt)
+}
+
+func (k *APIKey) BeforeCreate(tx *gorm.DB) error {
+	if k.Key == "" {
+		k.Key = generateSecureKey()
+	}
+	return nil
 }

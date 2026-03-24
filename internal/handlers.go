@@ -1,11 +1,14 @@
 package internal
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -325,5 +328,110 @@ func HandleReplicaLastUpdate(c *gin.Context) {
 	sendResponse(c, http.StatusOK, true, "Последнее обновление", gin.H{
 		"last_sync":     RS.GetLastSyncTime(),
 		"files_updated": RS.GetFilesUpdatedCount(),
+	})
+}
+
+func HandleCreateAPIKey(c *gin.Context) {
+	var req CreateAPIKeyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "Ошибка валидации",
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	var expiresAt *time.Time
+	if req.ExpiresIn > 0 {
+		t := time.Now().AddDate(0, 0, req.ExpiresIn)
+		expiresAt = &t
+	}
+
+	permsJSON, err := json.Marshal(req.Permissions)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "Ошибка сериализации прав",
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	key := APIKey{
+		Name:        req.Name,
+		Description: req.Description,
+		Permissions: string(permsJSON),
+		IPAddress:   req.IPAddress,
+		ExpiresAt:   expiresAt,
+	}
+
+	if err := Db.Create(&key).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "Ошибка создания ключа",
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"success": true,
+		"message": "API-ключ создан",
+		"data": CreateAPIKeyResponse{
+			Key:         key.Key,
+			Name:        key.Name,
+			Permissions: req.Permissions,
+			IPAddress:   key.IPAddress,
+			ExpiresAt:   key.ExpiresAt,
+			CreatedAt:   key.CreatedAt,
+		},
+	})
+}
+
+func HandleListAPIKeys(c *gin.Context) {
+	var keys []APIKey
+	if err := Db.Select("id, name, description, permissions, ip_address, expires_at, last_used_at, created_at").
+		Order("created_at DESC").
+		Find(&keys).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "Ошибка получения ключей",
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    gin.H{"keys": keys},
+	})
+}
+
+func HandleRevokeAPIKey(c *gin.Context) {
+	keyID := c.Param("id")
+
+	if currentKeyID, exists := c.Get("api_key_id"); exists {
+		if fmt.Sprintf("%v", currentKeyID) == keyID {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"message": "Нельзя отозвать текущий ключ",
+			})
+			return
+		}
+	}
+
+	if err := Db.Delete(&APIKey{}, keyID).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "Ошибка отзыва ключа",
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "API-ключ отозван",
 	})
 }

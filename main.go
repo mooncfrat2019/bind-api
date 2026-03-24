@@ -91,14 +91,12 @@ func main() {
 	r := gin.New()
 	r.Use(loggerMiddleware())
 	r.Use(gin.Recovery())
-
 	api := r.Group("/api")
 	{
 		api.GET("/status", app.HandleStatus)
 
-		// Endpoints для синхронизации (ТОЛЬКО MASTER)
 		if app.AppRole == "master" {
-			sync0 := api.Group("/sync", app.SH.SyncAuthMiddleware())
+			sync0 := api.Group("/sync").Use(app.SH.SyncAuthMiddleware())
 			{
 				sync0.GET("/state", app.SH.GetSyncState)
 				sync0.GET("/state/:fileType/:fileName", app.SH.GetSyncFile)
@@ -113,23 +111,34 @@ func main() {
 				sync0.DELETE("/version/:id", app.SH.DeleteVersion)
 			}
 
-			// Обычные API endpoints (ТОЛЬКО MASTER)
-			api.GET("/config", app.HandleConfig)
-			api.GET("/audit", app.HandleAuditLog)
-			api.GET("/audit/stats", app.HandleAuditStats)
-			api.POST("/reload", app.HandleReload)
-			api.GET("/zones", app.HandleListZones)
-			api.POST("/zone", app.HandleCreateZone)
-
-			zones := api.Group("/zone/:name")
+			// === ЗАЩИЩЁННЫЕ ЭНДПОИНТЫ ===
+			zoneRead := api.Group("/read").Use(app.APIKeyAuth("zone:read"))
 			{
-				zones.GET("", app.HandleGetZone)
-				zones.DELETE("", app.HandleDeleteZone)
-				zones.POST("/record", app.HandleAddRecord)
-				zones.DELETE("/record/:record/:type", app.HandleDeleteRecord)
+				// Чтение (требуется zone:read)
+				zoneRead.GET("/config", app.HandleConfig)
+				zoneRead.GET("/audit", app.HandleAuditLog)
+				zoneRead.GET("/audit/stats", app.HandleAuditStats)
+				zoneRead.GET("/zones", app.HandleListZones)
+				zoneRead.GET("/zone/:name", app.HandleGetZone)
+			}
+			zoneWrite := api.Group("/write").Use(app.APIKeyAuth("zone:write"))
+			{
+				// Запись (требуется zone:write)
+				zoneWrite.POST("/zone", app.HandleCreateZone)
+				zoneWrite.DELETE("/zone/:name", app.HandleDeleteZone)
+				zoneWrite.POST("/zone/:name/record", app.HandleAddRecord)
+				zoneWrite.DELETE("/zone/:name/record/:record/:type", app.HandleDeleteRecord)
+				zoneWrite.POST("/reload", app.HandleReload)
+			}
+
+			// Управление ключами (требуется admin)
+			keys := api.Group("/keys").Use(app.APIKeyAuth("admin"))
+			{
+				keys.POST("", app.HandleCreateAPIKey)
+				keys.GET("", app.HandleListAPIKeys)
+				keys.DELETE("/:id", app.HandleRevokeAPIKey)
 			}
 		} else {
-			// REPLICA - только статус и информация о синхронизации
 			api.GET("/sync/status", app.HandleReplicaStatus)
 			api.GET("/sync/last-update", app.HandleReplicaLastUpdate)
 		}
