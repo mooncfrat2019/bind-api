@@ -1056,7 +1056,6 @@ func (h *SyncHandler) GetSyncFile(c *gin.Context) {
 	fileType := c.Param("fileType")
 	fileName := c.Param("fileName")
 
-	// URL-декодируем fileName
 	decodedFileName, err := url.QueryUnescape(fileName)
 	if err != nil {
 		decodedFileName = fileName
@@ -1065,7 +1064,9 @@ func (h *SyncHandler) GetSyncFile(c *gin.Context) {
 	log.Printf("Запрос файла: type=%s, name=%s (decoded: %s)", fileType, fileName, decodedFileName)
 
 	var state SyncState
+	// ✅ ДОБАВЛЕНО: Order("version DESC")
 	if err := h.db.Where("file_type = ? AND file_name = ?", fileType, decodedFileName).
+		Order("version DESC").
 		First(&state).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
 			"success": false,
@@ -1113,9 +1114,11 @@ func (h *SyncHandler) GetSyncZones(c *gin.Context) {
 
 func (h *SyncHandler) GetSyncZone(c *gin.Context) {
 	zoneName := c.Param("zoneName")
-
 	var state SyncState
+
+	// ✅ ДОБАВЛЕНО: Order("version DESC")
 	if err := h.db.Where("file_type = ? AND zone_name = ?", "zone_file", zoneName).
+		Order("version DESC").
 		First(&state).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
 			"success": false,
@@ -1143,11 +1146,12 @@ func (h *SyncHandler) GetSyncZone(c *gin.Context) {
 func (h *SyncHandler) GetSyncFileQuery(c *gin.Context) {
 	fileType := c.Query("type")
 	fileName := c.Query("name")
-
 	log.Printf("Запрос файла (query): type=%s, name=%s", fileType, fileName)
 
 	var state SyncState
+	// ✅ ДОБАВЛЕНО: Order("version DESC")
 	if err := h.db.Where("file_type = ? AND file_name = ?", fileType, fileName).
+		Order("version DESC").
 		First(&state).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
 			"success": false,
@@ -1954,4 +1958,106 @@ func APIKeyAuth(requiredPerm string) gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+// StartNamedConfWatcher запускает фоновую задачу для отслеживания изменений named.conf
+func StartNamedConfWatcher() {
+	if AppRole != "master" {
+		return
+	}
+
+	log.Println("🔄 Запуск мониторинга изменений /etc/named.conf (интервал: 30 сек)")
+
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		// Первая проверка сразу
+		syncNamedConf()
+
+		for range ticker.C {
+			syncNamedConf()
+		}
+	}()
+}
+
+// syncNamedConf проверяет изменения в named.conf и сохраняет в БД если есть изменения
+func syncNamedConf() {
+	filePath := NamedConf
+	if filePath == "" {
+		filePath = DefaultNamedConf
+	}
+
+	// Проверяем существование файла
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		log.Printf("⚠️  Файл %s не существует, пропускаем синхронизацию", filePath)
+		return
+	}
+
+	// Вычисляем текущий checksum
+	currentChecksum, err := calculateChecksum(filePath)
+	if err != nil {
+		log.Printf("❌ Ошибка вычисления checksum для %s: %v", filePath, err)
+		return
+	}
+
+	// Получаем последний checksum из БД
+	var lastState SyncState
+	if err := Db.Where("file_type = ? AND file_name = ?", "named_conf", filePath).
+		Order("version DESC").
+		First(&lastState).Error; err != nil {
+		// Если записей нет - сохраняем первую версию
+		if err == gorm.ErrRecordNotFound {
+			log.Printf("📝 Первая версия %s, сохраняем в БД", filePath)
+			saveNamedConfVersion(filePath, currentChecksum)
+			return
+		}
+		log.Printf("❌ Ошибка получения последней версии: %v", err)
+		return
+	}
+
+	// Сравниваем checksum
+	if lastState.Checksum == currentChecksum {
+		// Изменений нет - пропускаем
+		return
+	}
+
+	// Изменения есть - сохраняем новую версию
+	log.Printf("📝 Обнаружены изменения в %s, сохраняем версию %d", filePath, lastState.Version+1)
+	saveNamedConfVersion(filePath, currentChecksum)
+}
+
+// saveNamedConfVersion сохраняет версию named.conf в БД
+func saveNamedConfVersion(filePath, checksum string) {
+	content, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		log.Printf("❌ Ошибка чтения файла %s: %v", filePath, err)
+		return
+	}
+
+	// Получаем последний номер версии
+	var lastVersion int
+	Db.Model(&SyncState{}).
+		Where("file_type = ? AND file_name = ?", "named_conf", filePath).
+		Select("COALESCE(MAX(version), 0)").
+		Scan(&lastVersion)
+
+	newVersion := lastVersion + 1
+
+	state := SyncState{
+		FileType:     "named_conf",
+		FileName:     filePath,
+		ZoneName:     "",
+		Checksum:     checksum,
+		Version:      newVersion,
+		Content:      string(content),
+		LastModified: time.Now(),
+	}
+
+	if err := Db.Create(&state).Error; err != nil {
+		log.Printf("❌ Ошибка сохранения версии в БД: %v", err)
+		return
+	}
+
+	log.Printf("✅ Сохранена версия %d для %s (checksum: %s...)", newVersion, filePath, checksum[:16])
 }

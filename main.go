@@ -57,6 +57,9 @@ func main() {
 
 		app.InitJobQueue()
 		log.Println("✓ Очередь заданий инициализирована")
+
+		// Запуск мониторинга named.conf
+		app.StartNamedConfWatcher()
 	}
 
 	// Инициализация клиента синхронизации (только REPLICA)
