@@ -1816,6 +1816,7 @@ func (r *ReplicaSync) transformOptionsBlock(content string) string {
 }
 
 func (r *ReplicaSync) transformZoneBlocks(content string) string {
+	// Регулярка захватывает весь блок зоны
 	zoneRegex := regexp.MustCompile(`(?s)zone\s+"([^"]+)"\s+(?:IN\s+)?\{([^}]+)\}`)
 
 	return zoneRegex.ReplaceAllStringFunc(content, func(match string) string {
@@ -1827,7 +1828,7 @@ func (r *ReplicaSync) transformZoneBlocks(content string) string {
 		zoneName := submatch[1]
 		zoneBody := submatch[2]
 
-		// Пропускаем специальные зоны
+		// Пропускаем специальные зоны (корневая, localhost, _tcp и т.п.)
 		if zoneName == "." || zoneName == "localhost" || strings.HasPrefix(zoneName, "_") {
 			return match
 		}
@@ -1841,19 +1842,38 @@ func (r *ReplicaSync) transformZoneBlocks(content string) string {
 }
 
 func (r *ReplicaSync) transformZoneBody(body string) string {
-	// 1. Меняем type master на type slave
-	body = regexp.MustCompile(`(?m)^\s*type\s+master\s*;`).ReplaceAllString(body, fmt.Sprintf("type %s;", r.Transform.ZoneType))
+	// 1. Определяем исходный тип зоны
+	originalType := ""
+	typeMatch := regexp.MustCompile(`(?m)^\s*type\s+(\w+)\s*;`).FindStringSubmatch(body)
+	if len(typeMatch) >= 2 {
+		originalType = strings.ToLower(typeMatch[1])
+	}
 
-	// 2. Добавляем masters {}
-	if r.Transform.ZoneType == "slave" && r.Transform.MasterIP != "" {
+	// 2. Пропускаем специальные типы зон (forward, hint, stub, delegate)
+	// Их не нужно трансформировать в slave
+	if originalType == "forward" || originalType == "hint" || originalType == "stub" || originalType == "delegate" {
+		log.Printf("⏭️ Пропускаем трансформацию зоны типа '%s'", originalType)
+		return body
+	}
+
+	// 3. Меняем type master на type slave (только для мастер-зон)
+	if originalType == "master" && r.Transform.ZoneType != "" {
+		body = regexp.MustCompile(`(?m)^\s*type\s+master\s*;`).ReplaceAllString(body, fmt.Sprintf("type %s;", r.Transform.ZoneType))
+	}
+
+	// 4. Добавляем masters {} только если:
+	//    - исходный тип был master
+	//    - целевой тип slave
+	//    - masters ещё нет в зоне
+	if originalType == "master" && r.Transform.ZoneType == "slave" && r.Transform.MasterIP != "" {
 		if !regexp.MustCompile(`(?m)^\s*masters\s*\{`).MatchString(body) {
-			body = regexp.MustCompile(`(type\s+\w+\s*;)`).ReplaceAllString(body,
+			body = regexp.MustCompile(`(type\s+slave\s*;)`).ReplaceAllString(body,
 				fmt.Sprintf("$1\n         masters { %s; };", r.Transform.MasterIP))
 		}
 	}
 
-	// 3. Меняем путь к файлу
-	if r.Transform.ZoneSubdir != "" {
+	// 5. Меняем путь к файлу (только относительные пути)
+	if r.Transform.ZoneSubdir != "" && originalType == "master" {
 		body = regexp.MustCompile(`file\s+"([^/"][^"]*\.zone[^"]*)"`).ReplaceAllStringFunc(body, func(match string) string {
 			submatch := regexp.MustCompile(`file\s+"([^"]+)"`).FindStringSubmatch(match)
 			if len(submatch) < 2 {
@@ -1865,6 +1885,14 @@ func (r *ReplicaSync) transformZoneBody(body string) string {
 			}
 			return fmt.Sprintf(`file "%s/%s"`, r.Transform.ZoneSubdir, filePath)
 		})
+	}
+
+	// 6. Удаляем allow-update (не нужно для slave)
+	body = regexp.MustCompile(`(?s)\s*allow-update\s*\{[^}]*\}\s*;`).ReplaceAllString(body, "")
+
+	// 7. Удаляем allow-transfer (если задано)
+	if r.Transform.RemoveAllowTransfer {
+		body = regexp.MustCompile(`(?s)\s*allow-transfer\s*\{[^}]*\}\s*;`).ReplaceAllString(body, "")
 	}
 
 	return body
