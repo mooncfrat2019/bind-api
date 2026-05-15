@@ -1,0 +1,78 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  release:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Build for ${{ matrix.arch }}
+        run: |
+          GOOS=linux GOARCH=${{ matrix.arch }} go build -o bind-api-linux-${{ matrix.arch }} main.go
+
+      - name: Create tar.gz for ${{ matrix.arch }}
+        run: |
+          tar -czf bind-api-linux-${{ matrix.arch }}.tar.gz bind-api-linux-${{ matrix.arch }}
+
+      - name: Generate Release Notes
+        id: release_notes
+        run: |
+          # Получаем предыдущий тег
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          
+          if [ -z "$PREVIOUS_TAG" ]; then
+            # Если предыдущего тега нет, берём все коммиты
+            NOTES=$(git log --pretty=format:"- %s (%h)" --reverse)
+          else
+            # Берём коммиты между предыдущим и текущим тегом
+            NOTES=$(git log ${PREVIOUS_TAG}..HEAD --pretty=format:"- %s (%h)" --reverse)
+          fi
+          
+          # Добавляем заголовок
+          CURRENT_TAG=${GITHUB_REF_NAME}
+          FULL_NOTES="## What's Changed in ${CURRENT_TAG}\n\n${NOTES}\n"
+          
+          # Если нет коммитов, добавляем сообщение
+          if [ -z "$NOTES" ]; then
+            FULL_NOTES="${FULL_NOTES}\nNo changes since previous release."
+          fi
+          
+          # Сохраняем в файл и переменную
+          echo -e "$FULL_NOTES" > release_notes.md
+          echo "RELEASE_NOTES<<EOF" >> $GITHUB_ENV
+          echo "$FULL_NOTES" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          
+          # Выводим для отладки
+          echo "Generated release notes:"
+          cat release_notes.md
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bind-api-linux-*.tar.gz
+          body_path: release_notes.md
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
