@@ -1,55 +1,56 @@
-stages:
-  - build
-  - release
+on:
+  push:
+    - workflows: [release-workflow]
+      filter:
+        tags: ["**"]
 
-variables:
+env:
   BINARY_NAME: bind-api
-  VERSION: ${CI_TAG}
+  VERSION: ${{ env.SOURCECRAFT_COMMIT_REF_NAME }}
 
-build:
-  stage: build
-  image: golang:1.21
-  script:
-    - GOOS=linux GOARCH=amd64 go build -o ${BINARY_NAME}-amd64 main.go
-    - tar -czf ${BINARY_NAME}-${VERSION}-amd64.tar.gz ${BINARY_NAME}-amd64
-    - GOOS=linux GOARCH=arm64 go build -o ${BINARY_NAME}-arm64 main.go
-    - tar -czf ${BINARY_NAME}-${VERSION}-arm64.tar.gz ${BINARY_NAME}-arm64
-  artifacts:
-    paths:
-      - "${BINARY_NAME}-${VERSION}-amd64.tar.gz"
-      - "${BINARY_NAME}-${VERSION}-arm64.tar.gz"
-  only:
-    - tags
+workflows:
+  release-workflow:
+    tasks:
+      - name: build-task
+        cubes:
+          - name: build-binary
+            image: docker.io/library/golang:1.26
+            script:
+              - GOOS=linux GOARCH=amd64 go build -o ${BINARY_NAME}-amd64 main.go
+              - tar -czf ${BINARY_NAME}-${VERSION}-amd64.tar.gz ${BINARY_NAME}-amd64
+              - GOOS=linux GOARCH=arm64 go build -o ${BINARY_NAME}-arm64 main.go
+              - tar -czf ${BINARY_NAME}-${VERSION}-arm64.tar.gz ${BINARY_NAME}-arm64
+            artifacts:
+              paths:
+                - "${BINARY_NAME}-${VERSION}-amd64.tar.gz"
+                - "${BINARY_NAME}-${VERSION}-arm64.tar.gz"
 
-release:
-  stage: release
-  image: alpine:latest
-  dependencies:
-    - build
-  script: |
-    apk add --no-cache curl jq
-    PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-    if [ -n "$PREV_TAG" ]; then
-      CHANGELOG=$(git log --pretty=format:"- %s (%h)" $PREV_TAG..HEAD)
-    else
-      CHANGELOG=$(git log --pretty=format:"- %s (%h)")
-    fi
-    curl -X POST \
-      -H "Authorization: Bearer ${SOURCECRAFT_TOKEN}" \
-      -H "Content-Type: application/json" \
-      "${SOURCECRAFT_API_URL}/api/v1/repos/${CI_PROJECT_ID}/releases" \
-      -d "{
-        \"tag_name\": \"${CI_TAG}\",
-        \"name\": \"Release ${CI_TAG}\",
-        \"body\": \"$CHANGELOG\"
-      }"
-    for asset in ${BINARY_NAME}-${VERSION}*.tar.gz; do
-      curl -X POST \
-        -H "Authorization: Bearer ${SOURCECRAFT_TOKEN}" \
-        -F "file=@${asset}" \
-        "${SOURCECRAFT_API_URL}/api/v1/repos/${CI_PROJECT_ID}/releases/${CI_TAG}/assets"
-    done
-  only:
-    - tags
-  environment:
-    name: production
+      - name: release-task
+        needs: ["build-task"]
+        cubes:
+          - name: create-release
+            image: docker.io/library/alpine:latest
+            script:
+              - |
+                apk add --no-cache curl jq
+                PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+                if [ -n "$PREV_TAG" ]; then
+                  CHANGELOG=$(git log --pretty=format:"- %s (%h)" $PREV_TAG..HEAD)
+                else
+                  CHANGELOG=$(git log --pretty=format:"- %s (%h)")
+                fi
+                curl -X POST \
+                  -H "Authorization: Bearer $SOURCECRAFT_TOKEN" \
+                  -H "Content-Type: application/json" \
+                  "https://api.sourcecraft.tech/api/v1/repos/$SOURCECRAFT_REPO_ID/releases" \
+                  -d "{
+                    \"tag_name\": \"$VERSION\",
+                    \"name\": \"Release $VERSION\",
+                    \"body\": \"$CHANGELOG\"
+                  }"
+                for asset in ${BINARY_NAME}-${VERSION}*.tar.gz; do
+                  curl -X POST \
+                    -H "Authorization: Bearer $SOURCECRAFT_TOKEN" \
+                    -F "file=@${asset}" \
+                    "https://api.sourcecraft.tech/api/v1/repos/$SOURCECRAFT_REPO_ID/releases/$VERSION/assets"
+                done
