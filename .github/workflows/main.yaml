@@ -44,6 +44,11 @@ jobs:
       - name: Generate Release Notes
         id: release_notes
         run: |
+          # Версия из go.mod
+          GO_MOD_VERSION=$(grep "^go " go.mod | awk '{print $2}')
+          # Реальная версия компилятора
+          GO_COMPILER_VERSION=$(go version | awk '{print $3}')
+          
           # Получаем предыдущий тег
           PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
           CURRENT_TAG=${GITHUB_REF_NAME}
@@ -91,7 +96,8 @@ jobs:
           
           ---
           ### 🔨 Build Details
-          - Go version: ${GO_VERSION}
+          - Go version: ${GO_MOD_VERSION}
+          - Go compiler version: ${GO_COMPILER_VERSION}
           - Build date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
           - Commit: ${GITHUB_SHA::7}
           
