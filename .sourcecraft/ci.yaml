@@ -16,6 +16,7 @@ on:
 
 env:
   BINARY_NAME: bind-api
+  TOKEN: ${{ secrets.REPO_TOKEN }}
 
 workflows:
   test-workflow:
@@ -134,7 +135,7 @@ workflows:
                 
                 # Отправляем запрос на создание релиза
                 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
-                  -H "Authorization: Bearer $SOURCECRAFT_TOKEN" \
+                  -H "Authorization: Bearer $TOKEN" \
                   -H "Content-Type: application/json" \
                   -H "Accept: application/json" \
                   "https://api.sourcecraft.tech/repos/$ORG_SLUG/$REPO_SLUG/releases" \
@@ -156,7 +157,7 @@ workflows:
                 for asset in ${BINARY_NAME}-${SOURCECRAFT_COMMIT_REF_NAME}*.tar.gz; do
                   echo "Загрузка $asset..."
                   UPLOAD_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
-                    -H "Authorization: Bearer $SOURCECRAFT_TOKEN" \
+                    -H "Authorization: Bearer $TOKEN" \
                     -F "file=@${asset}" \
                     "https://api.sourcecraft.tech/repos/$ORG_SLUG/$REPO_SLUG/releases/$SOURCECRAFT_COMMIT_REF_NAME/assets")
                   
