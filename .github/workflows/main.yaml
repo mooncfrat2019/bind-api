@@ -23,8 +23,6 @@ jobs:
 
       - name: Set up Go
         uses: actions/setup-go@v5
-        with:
-          go-version: '1.23'
 
       - name: Download dependencies
         run: go mod download
@@ -93,7 +91,7 @@ jobs:
           
           ---
           ### 🔨 Build Details
-          - Go version: 1.23
+          - Go version: ${GO_VERSION}
           - Build date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
           - Commit: ${GITHUB_SHA::7}
           
