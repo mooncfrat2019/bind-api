@@ -369,6 +369,135 @@ func getReverseZoneName(ip string) (string, error) {
 	return "", fmt.Errorf("IPv6 обратные зоны требуют ручной настройки")
 }
 
+// ensureReverseZoneExists проверяет существование обратной зоны и создаёт её если нужно
+func ensureReverseZoneExists(ip string, email string, nsIP string) error {
+	reverseZoneName, err := getReverseZoneName(ip)
+	if err != nil {
+		return fmt.Errorf("не удалось получить имя обратной зоны: %v", err)
+	}
+
+	log.Printf("Проверка обратной зоны: %s для IP %s", reverseZoneName, ip)
+
+	// Проверяем существует ли зона в конфиге
+	if zoneExistsInConfig(reverseZoneName) {
+		log.Printf("Обратная зона %s уже существует", reverseZoneName)
+		return nil
+	}
+
+	log.Printf("Обратная зона %s не найдена, создаём...", reverseZoneName)
+
+	// ЖЕСТКО ИСПОЛЬЗУЕМ NamedConf
+	targetConfigFile := NamedConf
+
+	// Создаём имя файла зоны
+	zoneFile := filepath.Join(ZoneDir, reverseZoneName+".rev")
+
+	// Проверяем что файл ещё не существует
+	if _, err := os.Stat(zoneFile); err == nil {
+		log.Printf("Файл зоны %s уже существует, пропускаем создание", zoneFile)
+		return nil
+	}
+
+	// Формируем email для SOA
+	if email == "" {
+		email = "admin." + reverseZoneName
+	}
+	soaEmail := strings.Replace(email, "@", ".", -1)
+	if !strings.HasSuffix(soaEmail, ".") {
+		soaEmail += "."
+	}
+
+	// Если nsIP не задан — берём первый доступный IP сервера
+	if nsIP == "" {
+		serverIPs := getServerIPs()
+		if len(serverIPs) > 0 {
+			nsIP = serverIPs[0]
+		} else {
+			nsIP = "127.0.0.1"
+		}
+	}
+
+	// Генерируем серийный номер
+	now := time.Now()
+	serial := fmt.Sprintf("%d%02d%02d01", now.Year(), now.Month(), now.Day())
+
+	// Создаём контент зоны
+	zoneContent := fmt.Sprintf(`$TTL %d
+@	IN	SOA	ns1.%s. %s (
+					%s	; Serial
+					%d	; Refresh
+					%d	; Retry
+					%d	; Expire
+					%d )	; Negative Cache TTL
+;
+@	IN	NS	ns1.%s.
+ns1	%d	IN	A	%s
+`, DefaultTTL, reverseZoneName, soaEmail, serial, DefaultRefresh, DefaultRetry, DefaultExpire, DefaultNegative, reverseZoneName, DefaultTTL, nsIP)
+
+	// Записываем файл зоны
+	err = withFileLock(zoneFile, func() error {
+		return os.WriteFile(zoneFile, []byte(zoneContent), 0644)
+	})
+	if err != nil {
+		return fmt.Errorf("не удалось создать файл обратной зоны: %v", err)
+	}
+
+	// Устанавливаем права
+	if err := fixPermissions(zoneFile); err != nil {
+		return fmt.Errorf("ошибка прав доступа: %v", err)
+	}
+
+	// Добавляем зону в КОНФИГ (NamedConf)
+	zoneConfig := fmt.Sprintf(`
+zone "%s" IN {
+         type master;
+         file "%s";
+         allow-update { none; };
+};
+`, reverseZoneName, filepath.Base(zoneFile))
+
+	err = withFileLock(targetConfigFile, func() error {
+		confFile, err := os.OpenFile(targetConfigFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
+		if err != nil {
+			return err
+		}
+		defer confFile.Close()
+		_, err = confFile.WriteString(zoneConfig)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("ошибка записи в конфиг %s: %v", targetConfigFile, err)
+	}
+
+	// Устанавливаем права на конфиг
+	exec.Command("chown", "root:named", targetConfigFile).Run()
+	exec.Command("chmod", "640", targetConfigFile).Run()
+
+	// Проверяем синтаксис
+	cmd := exec.Command("named-checkconf")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ошибка в конфигурации: %s", string(out))
+	}
+
+	cmd = exec.Command("named-checkzone", reverseZoneName, zoneFile)
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ошибка в файле зоны: %s", string(out))
+	}
+
+	log.Printf("Обратная зона %s создана: файл=%s, конфиг=%s", reverseZoneName, zoneFile, targetConfigFile)
+
+	// Обновляем состояние для синхронизации
+	if SH != nil {
+		SH.UpdateSyncState("named_conf", NamedConf, "", NamedConf, "api")
+		SH.UpdateSyncState("zone_conf", ZoneConfFile, "", ZoneConfFile, "api")
+		SH.UpdateSyncState("zone_file", zoneFile, reverseZoneName, zoneFile, "api")
+	}
+
+	return nil
+}
+
 func getPtrRecordName(ip string) (string, error) {
 	parsedIP := net.ParseIP(ip)
 	if parsedIP == nil {
@@ -782,6 +911,7 @@ func executeAddRecord(job *Job) JobResult {
 		return JobResult{Success: false, Error: fmt.Errorf("поддерживаются только A, AAAA, CNAME, MX, TXT, NS")}
 	}
 
+	// Валидация IP для A/AAAA записей
 	if recordType == "A" {
 		ip := net.ParseIP(job.RecordValue)
 		if ip == nil || ip.To4() == nil {
@@ -817,11 +947,35 @@ func executeAddRecord(job *Job) JobResult {
 		return JobResult{Success: false, Error: fmt.Errorf("ошибка записи в файл зоны: %v", err)}
 	}
 
-	if (recordType == "A" || recordType == "AAAA") && job.ReversePtr != "" {
+	// === АВТО-СОЗДАНИЕ ОБРАТНОЙ ЗОНЫ И PTR ЗАПИСИ ===
+	// Только для A/AAAA записей
+	if (recordType == "A" || recordType == "AAAA") && job.RecordValue != "" {
+		// 1. Создаём обратную зону если её нет
+		// ensureReverseZoneExists теперь сама запишет в NamedConf
+		zoneEmail := "admin." + job.ZoneName
+		zoneNsIP := ""
+		serverIPs := getServerIPs()
+		if len(serverIPs) > 0 {
+			zoneNsIP = serverIPs[0]
+		}
+
+		if err := ensureReverseZoneExists(job.RecordValue, zoneEmail, zoneNsIP); err != nil {
+			log.Printf("WARNING: Не удалось создать обратную зону для %s: %v", job.RecordValue, err)
+			// Не прерываем выполнение — продолжаем добавление записи
+		}
+
+		// 2. Добавляем PTR запись если задан reverse_ptr или генерируем автоматически
 		ptrName := job.ReversePtr
-		if !strings.HasSuffix(ptrName, ".") {
+		if ptrName == "" {
+			// Авто-генерация: www.test.local -> www.test.local.
+			ptrName = job.RecordName + "." + job.ZoneName
+			if !strings.HasSuffix(ptrName, ".") {
+				ptrName += "."
+			}
+		} else if !strings.HasSuffix(ptrName, ".") {
 			ptrName += "."
 		}
+
 		if err := addPtrRecord(job.RecordValue, ptrName, ttl); err != nil {
 			log.Printf("WARNING: Не удалось создать PTR запись: %v", err)
 			return JobResult{
@@ -842,6 +996,7 @@ func executeAddRecord(job *Job) JobResult {
 	// Обновляем состояние для синхронизации
 	if SH != nil {
 		SH.UpdateSyncState("zone_file", zone.File, job.ZoneName, zone.File, "api")
+		SH.UpdateSyncState("named_conf", NamedConf, "", NamedConf, "api")
 	}
 
 	return JobResult{Success: true, Message: "Запись добавлена"}
