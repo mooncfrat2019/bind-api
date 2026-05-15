@@ -89,6 +89,18 @@ workflows:
                   exit 1
                 fi
                 
+                # Извлекаем orgSlug и repoSlug из SOURCECRAFT_REPO_URL
+                # Формат: https://git@git.sourcecraft.dev/<orgSlug>/<repoSlug>.git
+                REPO_URL="$SOURCECRAFT_REPO_URL"
+                if [[ "$REPO_URL" =~ https://git@git\.sourcecraft\.dev/([^/]+)/([^/]+)\.git$ ]]; then
+                  ORG_SLUG="${BASH_REMATCH[1]}"
+                  REPO_SLUG="${BASH_REMATCH[2]}"
+                  echo "Извлечено: ORG_SLUG=$ORG_SLUG, REPO_SLUG=$REPO_SLUG"
+                else
+                  echo "Ошибка: не удалось извлечь slugs из SOURCECRAFT_REPO_URL: $REPO_URL"
+                  exit 1
+                fi
+                
                 # Формируем changelog
                 PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
                 if [ -n "$PREV_TAG" ]; then
@@ -100,26 +112,50 @@ workflows:
                 # Экранируем JSON
                 ESCAPED_CHANGELOG=$(echo "$CHANGELOG" | jq -R -s -c '.')
                 
-                # Создаем релиз
+                # Создаем релиз через API (согласно документации)
                 echo "Создание релиза в SourceCraft..."
-                curl -X POST \
+                echo "Endpoint: https://api.sourcecraft.tech/api/v1/repos/$ORG_SLUG/$REPO_SLUG/releases"
+                
+                # Отправляем запрос на создание релиза
+                RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
                   -H "Authorization: Bearer $SOURCECRAFT_TOKEN" \
                   -H "Content-Type: application/json" \
-                  "https://api.sourcecraft.tech/api/v1/repos/$SOURCECRAFT_REPO_ID/releases" \
+                  -H "Accept: application/json" \
+                  "https://api.sourcecraft.tech/api/v1/repos/$ORG_SLUG/$REPO_SLUG/releases" \
                   -d "{
                     \"tag_name\": \"$SOURCECRAFT_COMMIT_REF_NAME\",
                     \"name\": \"Release $SOURCECRAFT_COMMIT_REF_NAME\",
                     \"body\": $ESCAPED_CHANGELOG
-                  }"
+                  }")
+                
+                HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+                RESPONSE_BODY=$(echo "$RESPONSE" | sed '$d')
+                
+                echo "HTTP код ответа: $HTTP_CODE"
+                echo "Тело ответа: $RESPONSE_BODY"
+                
+                if [ "$HTTP_CODE" != "201" ] && [ "$HTTP_CODE" != "200" ]; then
+                  echo "Ошибка: не удалось создать релиз"
+                  exit 1
+                fi
                 
                 # Прикрепляем артефакты с правильными именами
                 echo "Прикрепление артефактов..."
                 for asset in ${BINARY_NAME}-${SOURCECRAFT_COMMIT_REF_NAME}*.tar.gz; do
                   echo "Загрузка $asset..."
-                  curl -X POST \
+                  UPLOAD_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
                     -H "Authorization: Bearer $SOURCECRAFT_TOKEN" \
                     -F "file=@${asset}" \
-                    "https://api.sourcecraft.tech/api/v1/repos/$SOURCECRAFT_REPO_ID/releases/$SOURCECRAFT_COMMIT_REF_NAME/assets"
+                    "https://api.sourcecraft.tech/api/v1/repos/$ORG_SLUG/$REPO_SLUG/releases/$SOURCECRAFT_COMMIT_REF_NAME/assets")
+                  
+                  UPLOAD_HTTP_CODE=$(echo "$UPLOAD_RESPONSE" | tail -n1)
+                  UPLOAD_BODY=$(echo "$UPLOAD_RESPONSE" | sed '$d')
+                  
+                  echo "HTTP код загрузки: $UPLOAD_HTTP_CODE"
+                  if [ "$UPLOAD_HTTP_CODE" != "201" ] && [ "$UPLOAD_HTTP_CODE" != "200" ]; then
+                    echo "Ошибка загрузки артефакта: $UPLOAD_BODY"
+                    exit 1
+                  fi
                 done
                 
-                echo "Релиз успешно создан!"
+                echo "Релиз успешно создан и артефакты загружены!"
