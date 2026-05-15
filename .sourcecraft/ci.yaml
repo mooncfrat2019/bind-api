@@ -43,12 +43,12 @@ workflows:
                 
                 # Проверяем наличие собранных файлов
                 if [ ! -f "$AMD64_FILE" ]; then
-                  echo 'Ошибка: файл "$AMD64_FILE" не найден'
+                  echo "Ошибка: файл \"$AMD64_FILE\" не найден"
                   exit 1
                 fi
                 
                 if [ ! -f "$ARM64_FILE" ]; then
-                  echo 'Ошибка: файл "$ARM64_FILE" не найден'
+                  echo "Ошибка: файл \"$ARM64_FILE\" не найден"
                   exit 1
                 fi
                 
