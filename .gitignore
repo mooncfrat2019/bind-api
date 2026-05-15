@@ -1,3 +1,6 @@
 .env
 bind-api
 *.exe
+*.tar
+*.tar.gz
+*.gz
