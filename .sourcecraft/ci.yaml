@@ -92,14 +92,19 @@ workflows:
                 # Извлекаем orgSlug и repoSlug из SOURCECRAFT_REPO_URL
                 # Формат: https://git@git.sourcecraft.dev/<orgSlug>/<repoSlug>.git
                 REPO_URL="$SOURCECRAFT_REPO_URL"
-                if [[ "$REPO_URL" =~ https://git@git\.sourcecraft\.dev/([^/]+)/([^/]+)\.git$ ]]; then
-                  ORG_SLUG="${BASH_REMATCH[1]}"
-                  REPO_SLUG="${BASH_REMATCH[2]}"
-                  echo "Извлечено: ORG_SLUG=$ORG_SLUG, REPO_SLUG=$REPO_SLUG"
-                else
+                # Удаляем префикс и суффикс
+                TEMP="${REPO_URL#https://git@git.sourcecraft.dev/}"
+                TEMP="${TEMP%.git}"
+                ORG_SLUG="${TEMP%/*}"
+                REPO_SLUG="${TEMP#*/}"
+                
+                if [ -z "$ORG_SLUG" ] || [ -z "$REPO_SLUG" ]; then
                   echo "Ошибка: не удалось извлечь slugs из SOURCECRAFT_REPO_URL: $REPO_URL"
+                  echo "Получено: ORG_SLUG=$ORG_SLUG, REPO_SLUG=$REPO_SLUG"
                   exit 1
                 fi
+                
+                echo "Извлечено: ORG_SLUG=$ORG_SLUG, REPO_SLUG=$REPO_SLUG"
                 
                 # Формируем changelog
                 PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
@@ -116,17 +121,22 @@ workflows:
                 echo "Создание релиза в SourceCraft..."
                 echo "Endpoint: https://api.sourcecraft.tech/api/v1/repos/$ORG_SLUG/$REPO_SLUG/releases"
                 
+                # Создаем JSON файл для запроса
+                cat > /tmp/release.json << EOF
+                {
+                  "tag_name": "$SOURCECRAFT_COMMIT_REF_NAME",
+                  "name": "Release $SOURCECRAFT_COMMIT_REF_NAME",
+                  "body": $ESCAPED_CHANGELOG
+                }
+                EOF
+                
                 # Отправляем запрос на создание релиза
                 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
                   -H "Authorization: Bearer $SOURCECRAFT_TOKEN" \
                   -H "Content-Type: application/json" \
                   -H "Accept: application/json" \
                   "https://api.sourcecraft.tech/api/v1/repos/$ORG_SLUG/$REPO_SLUG/releases" \
-                  -d "{
-                    \"tag_name\": \"$SOURCECRAFT_COMMIT_REF_NAME\",
-                    \"name\": \"Release $SOURCECRAFT_COMMIT_REF_NAME\",
-                    \"body\": $ESCAPED_CHANGELOG
-                  }")
+                  -d @/tmp/release.json)
                 
                 HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
                 RESPONSE_BODY=$(echo "$RESPONSE" | sed '$d')
