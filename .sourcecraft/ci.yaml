@@ -126,7 +126,6 @@ workflows:
                 cat > /tmp/release.json << EOF
                 {
                   "tag": "$SOURCECRAFT_COMMIT_REF_NAME",
-                  "target_branch": "$SOURCECRAFT_COMMIT_REF_NAME",
                   "body": $ESCAPED_CHANGELOG,
                   "title": "Release $SOURCECRAFT_COMMIT_REF_NAME",
                   "publish": true
