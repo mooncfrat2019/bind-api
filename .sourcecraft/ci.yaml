@@ -15,38 +15,79 @@ workflows:
           - name: build-binary
             image: docker.io/library/golang:1.26
             script:
+              - echo "Инициализация зависимостей Go..."
+              - go mod download
+              - echo "Зависимости загружены"
+              
+              - echo "Сборка бинарников для amd64 и arm64..."
+              - echo "Текущий тег: $SOURCECRAFT_COMMIT_REF_NAME"
+              
+              # Создаем файлы с именами, содержащими тег
               - GOOS=linux GOARCH=amd64 go build -o ${BINARY_NAME}-amd64 main.go
               - tar -czf ${BINARY_NAME}-${SOURCECRAFT_COMMIT_REF_NAME}-amd64.tar.gz ${BINARY_NAME}-amd64
+              
               - GOOS=linux GOARCH=arm64 go build -o ${BINARY_NAME}-arm64 main.go
               - tar -czf ${BINARY_NAME}-${SOURCECRAFT_COMMIT_REF_NAME}-arm64.tar.gz ${BINARY_NAME}-arm64
+              
+              - echo "Бинарники успешно собраны"
+              - ls -la *.tar.gz
             artifacts:
               paths:
-                - "${BINARY_NAME}-${SOURCECRAFT_COMMIT_REF_NAME}-amd64.tar.gz"
-                - "${BINARY_NAME}-${SOURCECRAFT_COMMIT_REF_NAME}-arm64.tar.gz"
-
+                - "*.tar.gz"
+          
           - name: create-release
             image: docker.io/library/alpine:latest
             script:
               - |
+                echo "Создание релиза ${SOURCECRAFT_COMMIT_REF_NAME}..."
                 apk add --no-cache curl jq
+                
+                # Используем реальные имена файлов с тегами
+                AMD64_FILE="${BINARY_NAME}-${SOURCECRAFT_COMMIT_REF_NAME}-amd64.tar.gz"
+                ARM64_FILE="${BINARY_NAME}-${SOURCECRAFT_COMMIT_REF_NAME}-arm64.tar.gz"
+                
+                # Проверяем наличие собранных файлов
+                if [ ! -f "$AMD64_FILE" ]; then
+                  echo "Ошибка: файл $AMD64_FILE не найден"
+                  exit 1
+                fi
+                
+                if [ ! -f "$ARM64_FILE" ]; then
+                  echo "Ошибка: файл $ARM64_FILE не найден"
+                  exit 1
+                fi
+                
+                # Формируем changelog
                 PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
                 if [ -n "$PREV_TAG" ]; then
                   CHANGELOG=$(git log --pretty=format:"- %s (%h)" $PREV_TAG..HEAD)
                 else
                   CHANGELOG=$(git log --pretty=format:"- %s (%h)")
                 fi
+                
+                # Экранируем JSON
+                ESCAPED_CHANGELOG=$(echo "$CHANGELOG" | jq -R -s -c '.')
+                
+                # Создаем релиз
+                echo "Создание релиза в SourceCraft..."
                 curl -X POST \
                   -H "Authorization: Bearer $SOURCECRAFT_TOKEN" \
                   -H "Content-Type: application/json" \
-                  "https://api.sourcecraft.tech/api/v1/repos/$SOURCECRAFT_REPO_ID/releases" \
+                  "https://api.sourcecraft.tech/api/v1/repos/$SOURCRAFT_REPO_ID/releases" \
                   -d "{
                     \"tag_name\": \"$SOURCECRAFT_COMMIT_REF_NAME\",
-                    \"name\": \"Release $SOURCECRAFT_COMMIT_REF_NAME\",
-                    \"body\": \"$CHANGELOG\"
+                    \"name\": \"Release $SOURCRAFT_COMMIT_REF_NAME\",
+                    \"body\": $ESCAPED_CHANGELOG
                   }"
+                
+                # Прикрепляем артефакты с правильными именами
+                echo "Прикрепление артефактов..."
                 for asset in ${BINARY_NAME}-${SOURCECRAFT_COMMIT_REF_NAME}*.tar.gz; do
+                  echo "Загрузка $asset..."
                   curl -X POST \
                     -H "Authorization: Bearer $SOURCECRAFT_TOKEN" \
                     -F "file=@${asset}" \
                     "https://api.sourcecraft.tech/api/v1/repos/$SOURCECRAFT_REPO_ID/releases/$SOURCECRAFT_COMMIT_REF_NAME/assets"
                 done
+                
+                echo "Релиз успешно создан!"
