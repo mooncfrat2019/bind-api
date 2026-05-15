@@ -6,7 +6,6 @@ on:
 
 env:
   BINARY_NAME: bind-api
-  VERSION: ${{ env.SOURCECRAFT_COMMIT_REF_NAME }}
 
 workflows:
   release-workflow:
@@ -17,13 +16,13 @@ workflows:
             image: docker.io/library/golang:1.26
             script:
               - GOOS=linux GOARCH=amd64 go build -o ${BINARY_NAME}-amd64 main.go
-              - tar -czf ${BINARY_NAME}-${VERSION}-amd64.tar.gz ${BINARY_NAME}-amd64
+              - tar -czf ${BINARY_NAME}-${SOURCECRAFT_COMMIT_REF_NAME}-amd64.tar.gz ${BINARY_NAME}-amd64
               - GOOS=linux GOARCH=arm64 go build -o ${BINARY_NAME}-arm64 main.go
-              - tar -czf ${BINARY_NAME}-${VERSION}-arm64.tar.gz ${BINARY_NAME}-arm64
+              - tar -czf ${BINARY_NAME}-${SOURCECRAFT_COMMIT_REF_NAME}-arm64.tar.gz ${BINARY_NAME}-arm64
             artifacts:
               paths:
-                - "${BINARY_NAME}-${VERSION}-amd64.tar.gz"
-                - "${BINARY_NAME}-${VERSION}-arm64.tar.gz"
+                - "${BINARY_NAME}-${SOURCECRAFT_COMMIT_REF_NAME}-amd64.tar.gz"
+                - "${BINARY_NAME}-${SOURCECRAFT_COMMIT_REF_NAME}-arm64.tar.gz"
 
           - name: create-release
             image: docker.io/library/alpine:latest
@@ -41,13 +40,13 @@ workflows:
                   -H "Content-Type: application/json" \
                   "https://api.sourcecraft.tech/api/v1/repos/$SOURCECRAFT_REPO_ID/releases" \
                   -d "{
-                    \"tag_name\": \"$VERSION\",
-                    \"name\": \"Release $VERSION\",
+                    \"tag_name\": \"$SOURCECRAFT_COMMIT_REF_NAME\",
+                    \"name\": \"Release $SOURCECRAFT_COMMIT_REF_NAME\",
                     \"body\": \"$CHANGELOG\"
                   }"
-                for asset in ${BINARY_NAME}-${VERSION}*.tar.gz; do
+                for asset in ${BINARY_NAME}-${SOURCECRAFT_COMMIT_REF_NAME}*.tar.gz; do
                   curl -X POST \
                     -H "Authorization: Bearer $SOURCECRAFT_TOKEN" \
                     -F "file=@${asset}" \
-                    "https://api.sourcecraft.tech/api/v1/repos/$SOURCECRAFT_REPO_ID/releases/$VERSION/assets"
+                    "https://api.sourcecraft.tech/api/v1/repos/$SOURCECRAFT_REPO_ID/releases/$SOURCECRAFT_COMMIT_REF_NAME/assets"
                 done
