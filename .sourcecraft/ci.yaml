@@ -124,9 +124,11 @@ workflows:
                 # Создаем JSON файл для запроса
                 cat > /tmp/release.json << EOF
                 {
-                  "tag_name": "$SOURCECRAFT_COMMIT_REF_NAME",
-                  "name": "Release $SOURCECRAFT_COMMIT_REF_NAME",
-                  "body": $ESCAPED_CHANGELOG
+                  "tag": "$SOURCECRAFT_COMMIT_REF_NAME",
+                  "target_branch": "$SOURCECRAFT_COMMIT_REF_NAME",
+                  "body": $ESCAPED_CHANGELOG,
+                  "title": "Release $SOURCECRAFT_COMMIT_REF_NAME",
+                  "publish": true
                 }
                 EOF
                 
