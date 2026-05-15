@@ -19,7 +19,6 @@ workflows:
               - go mod download
               - echo "Зависимости загружены"
               - echo "Сборка бинарников для amd64 и arm64..."
-              - echo 'Текущий тег: "$SOURCECRAFT_COMMIT_REF_NAME"'
               - GOOS=linux GOARCH=amd64 go build -o ${BINARY_NAME}-amd64 main.go
               - tar -czf ${BINARY_NAME}-${SOURCECRAFT_COMMIT_REF_NAME}-amd64.tar.gz ${BINARY_NAME}-amd64
               - GOOS=linux GOARCH=arm64 go build -o ${BINARY_NAME}-arm64 main.go
