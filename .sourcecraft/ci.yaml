@@ -1,5 +1,15 @@
+# Исправленная версия CI/CD - добавлены тесты и исправлены зависимости
 on:
+  pull_request:
+    - workflows: [test-workflow]
+      filter:
+        source_branches: ["**"]
+        target_branches: ["main"]
+
   push:
+    - workflows: [test-workflow]
+      filter:
+        branches: ["main", "develop"]
     - workflows: [release-workflow]
       filter:
         tags: ["**"]
@@ -8,6 +18,25 @@ env:
   BINARY_NAME: bind-api
 
 workflows:
+  test-workflow:
+    tasks:
+      - name: run-tests
+        cubes:
+          - name: setup-and-test
+            image: docker.io/library/golang:1.26
+            script:
+              - |
+                set -e
+                echo "Синхронизация зависимостей Go..."
+                go mod tidy
+                echo "Загрузка зависимостей..."
+                go mod download
+                echo "Проверка целостности зависимостей..."
+                go mod verify
+                echo "Запуск тестов..."
+                go test ./...
+                echo "Тесты успешно пройдены"
+
   release-workflow:
     tasks:
       - name: build-and-release
@@ -15,16 +44,21 @@ workflows:
           - name: build-binary
             image: docker.io/library/golang:1.26
             script:
-              - echo "Инициализация зависимостей Go..."
-              - go mod download
-              - echo "Зависимости загружены"
-              - echo "Сборка бинарников для amd64 и arm64..."
-              - GOOS=linux GOARCH=amd64 go build -o ${BINARY_NAME}-amd64 main.go
-              - tar -czf ${BINARY_NAME}-${SOURCECRAFT_COMMIT_REF_NAME}-amd64.tar.gz ${BINARY_NAME}-amd64
-              - GOOS=linux GOARCH=arm64 go build -o ${BINARY_NAME}-arm64 main.go
-              - tar -czf ${BINARY_NAME}-${SOURCECRAFT_COMMIT_REF_NAME}-arm64.tar.gz ${BINARY_NAME}-arm64
-              - echo "Бинарники успешно собраны"
-              - ls -la *.tar.gz
+              - |
+                set -e
+                echo "Очистка и синхронизация зависимостей Go..."
+                go mod tidy
+                echo "Загрузка зависимостей..."
+                go mod download
+                echo "Проверка целостности зависимостей..."
+                go mod verify
+                echo "Сборка бинарников для amd64 и arm64..."
+                GOOS=linux GOARCH=amd64 go build -o ${BINARY_NAME}-amd64 main.go
+                tar -czf ${BINARY_NAME}-${SOURCECRAFT_COMMIT_REF_NAME}-amd64.tar.gz ${BINARY_NAME}-amd64
+                GOOS=linux GOARCH=arm64 go build -o ${BINARY_NAME}-arm64 main.go
+                tar -czf ${BINARY_NAME}-${SOURCECRAFT_COMMIT_REF_NAME}-arm64.tar.gz ${BINARY_NAME}-arm64
+                echo "Бинарники успешно собраны"
+                ls -la *.tar.gz
             artifacts:
               paths:
                 - "*.tar.gz"
@@ -33,6 +67,7 @@ workflows:
             image: docker.io/library/alpine:latest
             script:
               - |
+                set -e
                 echo "Создание релиза ${SOURCECRAFT_COMMIT_REF_NAME}..."
                 apk add --no-cache curl jq
                 
