@@ -119,7 +119,7 @@ workflows:
                 
                 # Создаем релиз через API (согласно документации)
                 echo "Создание релиза в SourceCraft..."
-                echo "Endpoint: https://api.sourcecraft.tech/api/v1/repos/$ORG_SLUG/$REPO_SLUG/releases"
+                echo "Endpoint: https://api.sourcecraft.tech/repos/$ORG_SLUG/$REPO_SLUG/releases"
                 
                 # Создаем JSON файл для запроса
                 cat > /tmp/release.json << EOF
@@ -135,7 +135,7 @@ workflows:
                   -H "Authorization: Bearer $SOURCECRAFT_TOKEN" \
                   -H "Content-Type: application/json" \
                   -H "Accept: application/json" \
-                  "https://api.sourcecraft.tech/api/v1/repos/$ORG_SLUG/$REPO_SLUG/releases" \
+                  "https://api.sourcecraft.tech/repos/$ORG_SLUG/$REPO_SLUG/releases" \
                   -d @/tmp/release.json)
                 
                 HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
@@ -156,7 +156,7 @@ workflows:
                   UPLOAD_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
                     -H "Authorization: Bearer $SOURCECRAFT_TOKEN" \
                     -F "file=@${asset}" \
-                    "https://api.sourcecraft.tech/api/v1/repos/$ORG_SLUG/$REPO_SLUG/releases/$SOURCECRAFT_COMMIT_REF_NAME/assets")
+                    "https://api.sourcecraft.tech/repos/$ORG_SLUG/$REPO_SLUG/releases/$SOURCECRAFT_COMMIT_REF_NAME/assets")
                   
                   UPLOAD_HTTP_CODE=$(echo "$UPLOAD_RESPONSE" | tail -n1)
                   UPLOAD_BODY=$(echo "$UPLOAD_RESPONSE" | sed '$d')
