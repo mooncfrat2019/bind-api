@@ -126,6 +126,7 @@ workflows:
                 cat > /tmp/release.json << EOF
                 {
                   "tag": "$SOURCECRAFT_COMMIT_REF_NAME",
+                  "target_branch": "$SOURCECRAFT_COMMIT_REF_NAME",
                   "body": $ESCAPED_CHANGELOG,
                   "title": "Release $SOURCECRAFT_COMMIT_REF_NAME",
                   "publish": true
@@ -158,7 +159,8 @@ workflows:
                   UPLOAD_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
                     -H "Authorization: Bearer $TOKEN" \
                     -F "file=@${asset}" \
-                    "https://api.sourcecraft.tech/repos/$ORG_SLUG/$REPO_SLUG/releases/$SOURCECRAFT_COMMIT_REF_NAME/assets")
+                    -F "name=${BINARY_NAME}" \
+                    "https://api.sourcecraft.tech/repos/$ORG_SLUG/$REPO_SLUG/releases/tag/$SOURCECRAFT_COMMIT_REF_NAME/attachments")
                   
                   UPLOAD_HTTP_CODE=$(echo "$UPLOAD_RESPONSE" | tail -n1)
                   UPLOAD_BODY=$(echo "$UPLOAD_RESPONSE" | sed '$d')
