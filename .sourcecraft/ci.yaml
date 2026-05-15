@@ -69,7 +69,10 @@ workflows:
               - |
                 set -e
                 echo "Создание релиза ${SOURCECRAFT_COMMIT_REF_NAME}..."
-                apk add --no-cache curl jq
+                apk add --no-cache git curl jq
+                
+                # Проверяем наличие git
+                git --version
                 
                 # Используем реальные имена файлов с тегами
                 AMD64_FILE="${BINARY_NAME}-${SOURCECRAFT_COMMIT_REF_NAME}-amd64.tar.gz"
