@@ -1,5 +1,3 @@
-version: '1'
-
 stages:
   - build
   - release
