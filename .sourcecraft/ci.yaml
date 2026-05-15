@@ -1,71 +1,57 @@
-version: 1
-jobs:
-  build-and-release:
-    runs-on: ubuntu-latest
-    if: github.ref_type == 'tag'
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+version: '1'
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21'
+stages:
+  - build
+  - release
 
-      - name: Build for amd64
-        run: |
-          GOOS=linux GOARCH=amd64 go build -o bind-api-amd64 main.go
-          tar -czf bind-api-${{ github.ref_name }}-amd64.tar.gz bind-api-amd64
+variables:
+  BINARY_NAME: bind-api
+  VERSION: ${CI_TAG}
 
-      - name: Build for arm64
-        run: |
-          GOOS=linux GOARCH=arm64 go build -o bind-api-arm64 main.go
-          tar -czf bind-api-${{ github.ref_name }}-arm64.tar.gz bind-api-arm64
+build:
+  stage: build
+  image: golang:1.21
+  script:
+    - GOOS=linux GOARCH=amd64 go build -o ${BINARY_NAME}-amd64 main.go
+    - tar -czf ${BINARY_NAME}-${VERSION}-amd64.tar.gz ${BINARY_NAME}-amd64
+    - GOOS=linux GOARCH=arm64 go build -o ${BINARY_NAME}-arm64 main.go
+    - tar -czf ${BINARY_NAME}-${VERSION}-arm64.tar.gz ${BINARY_NAME}-arm64
+  artifacts:
+    paths:
+      - "${BINARY_NAME}-${VERSION}-amd64.tar.gz"
+      - "${BINARY_NAME}-${VERSION}-arm64.tar.gz"
+  only:
+    - tags
 
-      - name: Generate release notes
-        id: generate-notes
-        run: |
-          git fetch --tags
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          if [ -n "$PREV_TAG" ]; then
-            CHANGELOG=$(git log --pretty=format:"- %s (%h)" $PREV_TAG..HEAD)
-          else
-            CHANGELOG=$(git log --pretty=format:"- %s (%h)")
-          fi
-          echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
-          echo "$CHANGELOG" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Create release
-        id: create-release
-        uses: actions/create-release@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref_name }}
-          release_name: Release ${{ github.ref_name }}
-          body: ${{ steps.generate-notes.outputs.CHANGELOG }}
-          draft: false
-          prerelease: false
-
-      - name: Upload amd64 archive to release
-        uses: actions/upload-release-asset@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create-release.outputs.upload_url }}
-          asset_path: bind-api-${{ github.ref_name }}-amd64.tar.gz
-          asset_name: bind-api-${{ github.ref_name }}-amd64.tar.gz
-          asset_content_type: application/gzip
-
-      - name: Upload arm64 archive to release
-        uses: actions/upload-release-asset@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create-release.outputs.upload_url }}
-          asset_path: bind-api-${{ github.ref_name }}-arm64.tar.gz
-          asset_name: bind-api-${{ github.ref_name }}-arm64.tar.gz
-          asset_content_type: application/gzip
+release:
+  stage: release
+  image: alpine:latest
+  dependencies:
+    - build
+  script: |
+    apk add --no-cache curl jq
+    PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+    if [ -n "$PREV_TAG" ]; then
+      CHANGELOG=$(git log --pretty=format:"- %s (%h)" $PREV_TAG..HEAD)
+    else
+      CHANGELOG=$(git log --pretty=format:"- %s (%h)")
+    fi
+    curl -X POST \
+      -H "Authorization: Bearer ${SOURCECRAFT_TOKEN}" \
+      -H "Content-Type: application/json" \
+      "${SOURCECRAFT_API_URL}/api/v1/repos/${CI_PROJECT_ID}/releases" \
+      -d "{
+        \"tag_name\": \"${CI_TAG}\",
+        \"name\": \"Release ${CI_TAG}\",
+        \"body\": \"$CHANGELOG\"
+      }"
+    for asset in ${BINARY_NAME}-${VERSION}*.tar.gz; do
+      curl -X POST \
+        -H "Authorization: Bearer ${SOURCECRAFT_TOKEN}" \
+        -F "file=@${asset}" \
+        "${SOURCECRAFT_API_URL}/api/v1/repos/${CI_PROJECT_ID}/releases/${CI_TAG}/assets"
+    done
+  only:
+    - tags
+  environment:
+    name: production
