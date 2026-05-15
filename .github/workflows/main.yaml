@@ -24,7 +24,16 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: '1.23'
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Tidy dependencies (optional but recommended)
+        run: go mod tidy
+
+      - name: Verify dependencies
+        run: go mod verify
 
       - name: Build for ${{ matrix.arch }}
         run: |
@@ -39,33 +48,56 @@ jobs:
         run: |
           # Получаем предыдущий тег
           PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          CURRENT_TAG=${GITHUB_REF_NAME}
+          
+          # Формируем заголовок
+          cat > release_notes.md << EOF
+          ## Release ${CURRENT_TAG}
+          
+          ### Downloads
+          - \`bind-api-linux-amd64.tar.gz\` - AMD64 architecture
+          - \`bind-api-linux-arm64.tar.gz\` - ARM64 architecture
+          
+          ### Changelog
+          
+          EOF
           
           if [ -z "$PREVIOUS_TAG" ]; then
-            # Если предыдущего тега нет, берём все коммиты
-            NOTES=$(git log --pretty=format:"- %s (%h)" --reverse)
+            # Первый релиз - показываем все коммиты
+            echo "### All commits:" >> release_notes.md
+            git log --pretty=format:"- **%s** (%h) - %an, %ar" --reverse >> release_notes.md
           else
-            # Берём коммиты между предыдущим и текущим тегом
-            NOTES=$(git log ${PREVIOUS_TAG}..HEAD --pretty=format:"- %s (%h)" --reverse)
+            # Коммиты между релизами
+            echo "### Changes since ${PREVIOUS_TAG}:" >> release_notes.md
+            echo "" >> release_notes.md
+          
+            # Группируем по типу изменений (опционально)
+            echo "#### 🚀 New Features" >> release_notes.md
+            git log ${PREVIOUS_TAG}..HEAD --grep="feat" --pretty=format:"- %s (%h)" --reverse >> release_notes.md || echo "None" >> release_notes.md
+          
+            echo "" >> release_notes.md
+            echo "#### 🐛 Bug Fixes" >> release_notes.md
+            git log ${PREVIOUS_TAG}..HEAD --grep="fix" --pretty=format:"- %s (%h)" --reverse >> release_notes.md || echo "None" >> release_notes.md
+          
+            echo "" >> release_notes.md
+            echo "#### 📚 Documentation" >> release_notes.md
+            git log ${PREVIOUS_TAG}..HEAD --grep="docs" --pretty=format:"- %s (%h)" --reverse >> release_notes.md || echo "None" >> release_notes.md
+          
+            echo "" >> release_notes.md
+            echo "#### 🔧 Other Changes" >> release_notes.md
+            git log ${PREVIOUS_TAG}..HEAD --invert-grep --grep="feat" --grep="fix" --grep="docs" --pretty=format:"- %s (%h)" --reverse >> release_notes.md || echo "None" >> release_notes.md
           fi
           
-          # Добавляем заголовок
-          CURRENT_TAG=${GITHUB_REF_NAME}
-          FULL_NOTES="## What's Changed in ${CURRENT_TAG}\n\n${NOTES}\n"
+          # Добавляем информацию о сборке
+          cat >> release_notes.md << EOF
           
-          # Если нет коммитов, добавляем сообщение
-          if [ -z "$NOTES" ]; then
-            FULL_NOTES="${FULL_NOTES}\nNo changes since previous release."
-          fi
+          ---
+          ### 🔨 Build Details
+          - Go version: 1.23
+          - Build date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          - Commit: ${GITHUB_SHA::7}
           
-          # Сохраняем в файл и переменную
-          echo -e "$FULL_NOTES" > release_notes.md
-          echo "RELEASE_NOTES<<EOF" >> $GITHUB_ENV
-          echo "$FULL_NOTES" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-          
-          # Выводим для отладки
-          echo "Generated release notes:"
-          cat release_notes.md
+          EOF
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
