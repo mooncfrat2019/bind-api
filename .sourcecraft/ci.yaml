@@ -11,7 +11,7 @@ env:
 workflows:
   release-workflow:
     tasks:
-      - name: build-task
+      - name: build-and-release
         cubes:
           - name: build-binary
             image: docker.io/library/golang:1.26
@@ -25,9 +25,6 @@ workflows:
                 - "${BINARY_NAME}-${VERSION}-amd64.tar.gz"
                 - "${BINARY_NAME}-${VERSION}-arm64.tar.gz"
 
-      - name: release-task
-        needs: ["build-task"]
-        cubes:
           - name: create-release
             image: docker.io/library/alpine:latest
             script:
