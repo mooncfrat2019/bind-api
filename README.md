@@ -277,7 +277,7 @@ sudo ./bind-api
 {
   "success": true,
   "message": "Описание результата",
-  "data": {...}
+  "data": {}
 }
 ```
 
@@ -337,7 +337,7 @@ sudo ./bind-api
 ```bash
 curl -X POST http://localhost:8080/api/write/zone \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: your_api_key" \
+  -H "X-API-Key: <...>" \
   -d '{"name": "test.local", "email": "admin.test.local", "ns_ip": "10.69.13.3"}'
 ```
 
@@ -346,7 +346,7 @@ curl -X POST http://localhost:8080/api/write/zone \
 ```bash
 curl -X POST http://localhost:8080/api/write/zone/test.local/record \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: your_api_key" \
+  -H "X-API-Key: <...>" \
   -d '{"name": "www", "type": "A", "value": "192.168.1.100"}'
 ```
 
@@ -355,7 +355,7 @@ curl -X POST http://localhost:8080/api/write/zone/test.local/record \
 ```bash
 curl -X POST http://localhost:8080/api/keys/ \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: admin_key" \
+  -H "X-API-Key: <...>" \
   -d '{
     "name": "monitoring",
     "description": "Мониторинг зон",
@@ -368,7 +368,7 @@ curl -X POST http://localhost:8080/api/keys/ \
 
 ```bash
 curl -X POST http://localhost:8080/api/sync/version/12/rollback \
-  -H "X-Sync-Token: your_sync_token"
+  -H "X-Sync-Token: <...>"
 ```
 
 ---
@@ -453,7 +453,7 @@ CREATE TABLE sync_states (
 #### Просмотр истории
 
 ```bash
-curl -H "X-Sync-Token: your_token" \
+curl -H "X-Sync-Token: <...>" \
   "http://master:8080/api/sync/versions/zone_file?fileName=%2Fvar%2Fnamed%2Ftest.local.zone"
 ```
 
@@ -461,11 +461,11 @@ curl -H "X-Sync-Token: your_token" \
 
 ```bash
 # 1. Получить список версий
-curl -H "X-Sync-Token: your_token" \
+curl -H "X-Sync-Token: <...>" \
   "http://master:8080/api/sync/versions/zone_file?fileName=..."
 
 # 2. Откатиться к версии
-curl -X POST -H "X-Sync-Token: your_token" \
+curl -X POST -H "X-Sync-Token: <...>" \
   http://master:8080/api/sync/version/<ID>/rollback
 ```
 
