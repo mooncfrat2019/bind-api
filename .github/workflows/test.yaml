@@ -1,0 +1,155 @@
+name: Run Tests
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:  # Ручной запуск
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Install dependencies
+        run: |
+          go mod download
+          go mod verify
+
+      - name: Install gcc (for SQLite CGO)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libsqlite3-dev
+
+      - name: Run tests
+        run: |
+          go test ./... -v -coverprofile=coverage.out -covermode=atomic -timeout 10m
+        env:
+          CGO_ENABLED: 1
+
+      - name: Run tests with race detector
+        run: |
+          go test ./... -race -v -timeout 10m
+        env:
+          CGO_ENABLED: 1
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.out
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            coverage.out
+            *.log
+          retention-days: 7
+
+  test-internal:
+    name: Test Internal Package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libsqlite3-dev
+          go mod download
+
+      - name: Run internal tests sequentially
+        run: |
+          go test ./internal/... -v -p 1 -timeout 5m
+        env:
+          CGO_ENABLED: 1
+
+      - name: Run internal tests with coverage
+        run: |
+          go test ./internal/... -coverprofile=internal-coverage.out -p 1
+        env:
+          CGO_ENABLED: 1
+
+  test-race:
+    name: Race Detection
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libsqlite3-dev
+          go mod download
+
+      - name: Run race detection
+        run: |
+          go test ./... -race -v -timeout 10m
+        env:
+          CGO_ENABLED: 1
+
+  test-bench:
+    name: Benchmark Tests
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libsqlite3-dev
+          go mod download
+
+      - name: Run benchmarks
+        run: |
+          go test ./... -bench=. -benchmem -benchtime=1s -run=^$ -timeout 10m
+        env:
+          CGO_ENABLED: 1
+
+      - name: Save benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark.txt
+          retention-days: 30

@@ -1,0 +1,51 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [ main, master ]
+  schedule:
+    - cron: '0 0 * * 0'  # Раз в неделю
+
+jobs:
+  gosec:
+    name: Gosec Security Scanner
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Run Gosec
+        uses: securego/gosec@master
+        with:
+          args: ./...
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: gosec-results
+          path: gosec-results.json
+          retention-days: 7
+
+  govulncheck:
+    name: Vulnerability Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Run govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
