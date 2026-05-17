@@ -1,0 +1,9 @@
+.git
+*.log
+*.exe
+*.test
+*.out
+coverage.html
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    volumes:
+      - ./:/app
+      - test-cache:/go/pkg/mod
+    environment:
+      - CGO_ENABLED=1
+      - GOOS=linux
+      - GOARCH=amd64
+    command: go test ./internal/... -v
+
+  test-all:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    volumes:
+      - ./:/app
+      - test-cache:/go/pkg/mod
+    environment:
+      - CGO_ENABLED=1
+    command: go test ./... -v
+
+  test-coverage:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    volumes:
+      - ./:/app
+      - test-cache:/go/pkg/mod
+    environment:
+      - CGO_ENABLED=1
+    command: sh -c "go test ./... -coverprofile=coverage.out && go tool cover -func=coverage.out"
+
+  test-race:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    volumes:
+      - ./:/app
+      - test-cache:/go/pkg/mod
+    environment:
+      - CGO_ENABLED=1
+    command: go test ./... -race -v
+
+  shell:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    volumes:
+      - ./:/app
+      - test-cache:/go/pkg/mod
+    environment:
+      - CGO_ENABLED=1
+    command: /bin/bash
+    stdin_open: true
+    tty: true
+
+volumes:
+  test-cache:

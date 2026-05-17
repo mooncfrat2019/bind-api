@@ -2091,6 +2091,16 @@ func APIKeyAuth(requiredPerm string) gin.HandlerFunc {
 			return
 		}
 
+		// Проверяем что Db не nil
+		if Db == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"message": "Внутренняя ошибка сервера: база данных не инициализирована",
+			})
+			c.Abort()
+			return
+		}
+
 		var key APIKey
 		if err := Db.Where("key = ?", apiKey).First(&key).Error; err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{
@@ -2131,9 +2141,12 @@ func APIKeyAuth(requiredPerm string) gin.HandlerFunc {
 			}
 		}
 
+		// Асинхронно обновляем время последнего использования
 		go func(keyID uint) {
-			now := time.Now()
-			Db.Model(&APIKey{}).Where("id = ?", keyID).Update("last_used_at", now)
+			if Db != nil {
+				now := time.Now()
+				Db.Model(&APIKey{}).Where("id = ?", keyID).Update("last_used_at", now)
+			}
 		}(key.ID)
 
 		c.Set("api_key_id", key.ID)
