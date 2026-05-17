@@ -33,11 +33,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc libsqlite3-dev
 
-      - name: Run tests
+      - name: Run tests sequentially
         run: |
-          go test ./... -v -coverprofile=coverage.out -covermode=atomic -timeout 10m
-        env:
-          CGO_ENABLED: 1
+          CGO_ENABLED=1 go test ./... -v -coverprofile=coverage.out -covermode=atomic -timeout 10m -p 1 -parallel 1
 
       - name: Run tests with race detector
         run: |

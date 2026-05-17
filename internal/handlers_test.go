@@ -8,42 +8,27 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
-var (
-	testDbMutex sync.Mutex
-)
-
 func setupTest(t *testing.T) (*gin.Engine, *gorm.DB, string) {
-	testDbMutex.Lock()
-	defer testDbMutex.Unlock()
-
 	gin.SetMode(gin.TestMode)
 
-	// Создаём уникальную БД в памяти
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared&_pragma=foreign_keys(0)&_pragma=journal_mode(WAL)"), &gorm.Config{
-		SkipDefaultTransaction: true,
-	})
+	// Используем общую функцию setup
+	db := SetupTestDB(t)
+
+	err := db.AutoMigrate(&AuditLog{}, &SyncState{}, &APIKey{})
 	require.NoError(t, err)
 
-	// Миграции
-	err = db.AutoMigrate(&AuditLog{}, &SyncState{}, &APIKey{})
-	require.NoError(t, err)
-
-	// Сохраняем старую БД и устанавливаем новую
 	oldDB := Db
-	Db = db
+	SetGlobalDB(db)
 
-	// Создаём тестовый API-ключ
 	permsJSON, _ := json.Marshal([]string{"*"})
 	testKey := &APIKey{
 		Name:        "test-key",
@@ -56,7 +41,7 @@ func setupTest(t *testing.T) (*gin.Engine, *gorm.DB, string) {
 	router := gin.New()
 
 	t.Cleanup(func() {
-		Db = oldDB
+		RestoreGlobalDB(oldDB)
 	})
 
 	return router, db, testKey.Key
