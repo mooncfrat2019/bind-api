@@ -35,7 +35,7 @@ workflows:
                 echo "Проверка целостности зависимостей..."
                 go mod verify
                 echo "Запуск тестов..."
-                go test ./...
+                go test ./... -v -p 1 -timeout 10m
                 echo "Тесты успешно пройдены"
 
   release-workflow:

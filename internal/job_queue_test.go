@@ -5,27 +5,37 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
 func setupJobQueueTest(t *testing.T) {
-	// Инициализируем БД для тестов
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
-	assert.NoError(t, err)
+	// Создаём уникальную БД для каждого теста с уникальным именем
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared&_pragma=foreign_keys(0)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"), &gorm.Config{})
+	require.NoError(t, err)
 
+	// Сохраняем старую БД и устанавливаем новую
 	oldDB := Db
 	Db = db
+
+	// Миграции
 	err = db.AutoMigrate(&AuditLog{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Инициализируем очередь
+	oldJQ := JQ
 	JQ = make(chan *Job, MaxQueueSize)
+
+	// Запускаем worker в фоне
 	go jobWorker()
 
 	t.Cleanup(func() {
+		// Закрываем очередь и ждём завершения worker
+		close(JQ)
+		time.Sleep(100 * time.Millisecond)
 		Db = oldDB
-		JQ = nil
+		JQ = oldJQ
 	})
 }
 
@@ -42,13 +52,6 @@ func TestSubmitJob(t *testing.T) {
 		ZoneName:   "test.com",
 		ResponseCh: make(chan JobResult, 1),
 		CreatedAt:  time.Now(),
-	}
-
-	// Получаем последний ID из аудита
-	var lastID uint
-	if Db != nil {
-		Db.Model(&AuditLog{}).Select("COALESCE(MAX(id), 0)").Scan(&lastID)
-		job.ID = int64(lastID) + 1
 	}
 
 	// Отправляем в очередь

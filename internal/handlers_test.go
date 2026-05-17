@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,21 +19,35 @@ import (
 	"gorm.io/gorm"
 )
 
+var (
+	testDbMutex sync.Mutex
+)
+
 func setupTest(t *testing.T) (*gin.Engine, *gorm.DB, string) {
+	testDbMutex.Lock()
+	defer testDbMutex.Unlock()
+
 	gin.SetMode(gin.TestMode)
 
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	// Создаём уникальную БД в памяти
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared&_pragma=foreign_keys(0)&_pragma=journal_mode(WAL)"), &gorm.Config{
+		SkipDefaultTransaction: true,
+	})
 	require.NoError(t, err)
 
+	// Миграции
 	err = db.AutoMigrate(&AuditLog{}, &SyncState{}, &APIKey{})
 	require.NoError(t, err)
 
+	// Сохраняем старую БД и устанавливаем новую
 	oldDB := Db
 	Db = db
 
+	// Создаём тестовый API-ключ
 	permsJSON, _ := json.Marshal([]string{"*"})
 	testKey := &APIKey{
 		Name:        "test-key",
+		Description: "Test API Key",
 		Permissions: string(permsJSON),
 	}
 	err = db.Create(testKey).Error
