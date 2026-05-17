@@ -6,27 +6,45 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
-func setupAPIKeyTest(t *testing.T) (*gin.Engine, string) {
+var (
+	testMutex sync.Mutex
+)
+
+// setupTestDB создаёт изолированную БД для каждого теста
+func setupTestDB(t *testing.T) *gorm.DB {
+	testMutex.Lock()
+	defer testMutex.Unlock()
+
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"), &gorm.Config{
+		SkipDefaultTransaction: true,
+	})
+	require.NoError(t, err)
+
+	return db
+}
+
+func setupAPIKeyTest(t *testing.T) (*gin.Engine, string, *gorm.DB) {
 	gin.SetMode(gin.TestMode)
 
-	// Создаём уникальную БД с блокировкой
-	db := SetupTestDB(t)
+	db := setupTestDB(t)
 
-	// Миграции
 	err := db.AutoMigrate(&APIKey{})
 	require.NoError(t, err)
 
 	// Сохраняем старую БД и устанавливаем новую
 	oldDB := Db
-	SetGlobalDB(db)
+	Db = db
 
 	// Создаём админский ключ
 	permsJSON, _ := json.Marshal([]string{"admin", "zone:read", "zone:write"})
@@ -41,16 +59,14 @@ func setupAPIKeyTest(t *testing.T) (*gin.Engine, string) {
 	router := gin.New()
 
 	t.Cleanup(func() {
-		RestoreGlobalDB(oldDB)
+		Db = oldDB
 	})
 
-	return router, adminKey.Key
+	return router, adminKey.Key, db
 }
 
 func TestAPIKeyAuth(t *testing.T) {
-	router, _ := setupAPIKeyTest(t)
-
-	db := Db
+	router, _, db := setupAPIKeyTest(t)
 
 	// Создаём тестовый ключ
 	permsJSON, _ := json.Marshal([]string{"zone:read"})
@@ -100,7 +116,7 @@ func TestAPIKeyAuth(t *testing.T) {
 }
 
 func TestAPIKeyCreateAndList(t *testing.T) {
-	router, adminKey := setupAPIKeyTest(t)
+	router, adminKey, db := setupAPIKeyTest(t)
 
 	router.POST("/api/keys", APIKeyAuth("admin"), HandleCreateAPIKey)
 	router.GET("/api/keys", APIKeyAuth("admin"), HandleListAPIKeys)
@@ -119,7 +135,7 @@ func TestAPIKeyCreateAndList(t *testing.T) {
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
-	assert.Equal(t, http.StatusCreated, w.Code)
+	assert.Equal(t, http.StatusCreated, w.Code, "Create API key failed")
 
 	// Тест списка ключей
 	req = httptest.NewRequest(http.MethodGet, "/api/keys", nil)
@@ -127,18 +143,18 @@ func TestAPIKeyCreateAndList(t *testing.T) {
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
-	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, http.StatusOK, w.Code, "List API keys failed")
 
 	var response map[string]interface{}
 	err := json.Unmarshal(w.Body.Bytes(), &response)
 	require.NoError(t, err)
 	assert.True(t, response["success"].(bool))
+
+	_ = db // используем чтобы избежать warning
 }
 
 func TestAPIKeyRevoke(t *testing.T) {
-	router, adminKey := setupAPIKeyTest(t)
-
-	db := Db
+	router, adminKey, db := setupAPIKeyTest(t)
 
 	userPerms, _ := json.Marshal([]string{"zone:read"})
 	userKey := &APIKey{
@@ -155,7 +171,7 @@ func TestAPIKeyRevoke(t *testing.T) {
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
-	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, http.StatusOK, w.Code, "Revoke API key failed")
 
 	var count int64
 	db.Model(&APIKey{}).Where("id = ?", userKey.ID).Count(&count)
@@ -163,9 +179,7 @@ func TestAPIKeyRevoke(t *testing.T) {
 }
 
 func TestAPIKeyRevokeOwnKey(t *testing.T) {
-	router, _ := setupAPIKeyTest(t)
-
-	db := Db
+	router, _, db := setupAPIKeyTest(t)
 
 	permsJSON, _ := json.Marshal([]string{"admin"})
 	key := &APIKey{
@@ -177,18 +191,18 @@ func TestAPIKeyRevokeOwnKey(t *testing.T) {
 
 	router.DELETE("/api/keys/:id", APIKeyAuth("admin"), HandleRevokeAPIKey)
 
+	// Пытаемся удалить свой же ключ
 	req := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/keys/%d", key.ID), nil)
 	req.Header.Set("X-API-Key", key.Key)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
-	assert.Equal(t, http.StatusBadRequest, w.Code)
+	// Должен быть BadRequest, нельзя удалить свой ключ
+	assert.Equal(t, http.StatusBadRequest, w.Code, "Should not allow revoking own key")
 }
 
 func TestAPIKeyIPRestriction(t *testing.T) {
-	router, _ := setupAPIKeyTest(t)
-
-	db := Db
+	router, _, db := setupAPIKeyTest(t)
 
 	permsJSON, _ := json.Marshal([]string{"*"})
 	ipKey := &APIKey{
@@ -203,13 +217,14 @@ func TestAPIKeyIPRestriction(t *testing.T) {
 		c.JSON(http.StatusOK, gin.H{"success": true})
 	})
 
+	// Запрос с другого IP
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
 	req.Header.Set("X-API-Key", ipKey.Key)
 	req.RemoteAddr = "10.0.0.1:12345"
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
-	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Equal(t, http.StatusForbidden, w.Code, "IP restriction should block request")
 }
 
 func TestAPIKeyHasPermission(t *testing.T) {
