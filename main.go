@@ -107,6 +107,8 @@ func main() {
 				sync0.GET("/zone/:zoneName", app.SH.GetSyncZone)
 				sync0.GET("/file", app.SH.GetSyncFileQuery)
 
+				sync0.GET("/zone/:zoneName/records", app.HandleSyncZoneRecords)
+
 				// Работа с версиями
 				sync0.GET("/versions/:fileType", app.SH.GetVersions)
 				sync0.GET("/version/:id", app.SH.GetVersion)

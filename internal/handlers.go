@@ -435,3 +435,32 @@ func HandleRevokeAPIKey(c *gin.Context) {
 		"message": "API-ключ отозван",
 	})
 }
+
+// HandleSyncZoneRecords возвращает все A записи зоны
+func HandleSyncZoneRecords(c *gin.Context) {
+	zoneName := c.Param("zoneName")
+
+	zone, exists := getZoneFromConfig(zoneName)
+	if !exists {
+		sendResponse(c, http.StatusNotFound, false, "Зона не найдена", nil)
+		return
+	}
+
+	records, err := readZoneFileSimple(zone.File)
+	if err != nil {
+		sendResponse(c, http.StatusInternalServerError, false, "Ошибка чтения зоны", err.Error())
+		return
+	}
+
+	// Фильтруем только A и AAAA записи
+	var aRecords []RecordInfo
+	for _, rec := range records {
+		if rec.Type == "A" || rec.Type == "AAAA" {
+			aRecords = append(aRecords, rec)
+		}
+	}
+
+	sendResponse(c, http.StatusOK, true, "A записи зоны", gin.H{
+		"records": aRecords,
+	})
+}

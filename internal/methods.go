@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -1650,6 +1651,7 @@ func (r *ReplicaSync) sync() {
 	log.Println("=== Начало синхронизации с мастером ===")
 	startTime := time.Now()
 
+	// Существующая синхронизация файлов
 	masterState, err := r.getMasterState()
 	if err != nil {
 		log.Printf("❌ Ошибка получения состояния с мастера: %v", err)
@@ -1677,7 +1679,15 @@ func (r *ReplicaSync) sync() {
 	r.mu.Unlock()
 
 	elapsed := time.Since(startTime)
-	log.Printf("=== Синхронизация завершена за %v: обновлено %d файлов ===", elapsed, changedFiles)
+	log.Printf("=== Синхронизация файлов завершена за %v: обновлено %d файлов ===", elapsed, changedFiles)
+
+	// НОВЫЙ КОД: Проверка зон и их A записей
+	log.Println("=== Начинаем проверку зон и A записей ===")
+	if err := r.CheckAndFixZones(); err != nil {
+		log.Printf("❌ Ошибка при проверке зон: %v", err)
+	} else {
+		log.Println("=== Проверка зон завершена ===")
+	}
 
 	if changedFiles > 0 {
 		if err := r.reloadBIND(); err != nil {
@@ -2256,4 +2266,218 @@ func saveNamedConfVersion(filePath, checksum string) {
 	}
 
 	log.Printf("✅ Сохранена версия %d для %s (checksum: %s...)", newVersion, filePath, checksum[:16])
+}
+
+// CheckARecordResolve проверяет, резолвится ли A запись через DNS реплики
+func (r *ReplicaSync) CheckARecordResolve(zoneName, recordName, recordValue string) bool {
+	// Формируем полное доменное имя
+	var fqdn string
+	if recordName == "@" {
+		fqdn = zoneName
+	} else if strings.HasSuffix(recordName, zoneName) {
+		fqdn = recordName
+	} else {
+		fqdn = recordName + "." + zoneName
+	}
+
+	// Убираем точку в конце если есть
+	fqdn = strings.TrimSuffix(fqdn, ".")
+
+	replicaIP := os.Getenv("REPLICA_EXTERNAL_IP")
+	if replicaIP == "" {
+		replicaIP = "127.0.0.1"
+	}
+
+	log.Printf("Проверка резолвинга %s через реплику %s, ожидается %s", fqdn, replicaIP, recordValue)
+
+	// Выполняем nslookup: запрашиваем A-запись (тип 1) у указанного DNS-сервера [citation:5]
+	cmd := exec.Command("nslookup", "-type=A", fqdn, replicaIP)
+	output, err := cmd.CombinedOutput()
+
+	if err != nil {
+		log.Printf("Ошибка при выполнении nslookup для %s: %v", fqdn, err)
+		return false
+	}
+
+	// Парсим вывод для извлечения IP-адреса
+	resolvedIP := parseNslookupForIP(string(output))
+	if resolvedIP == "" {
+		log.Printf("Не удалось извлечь IP-адрес из вывода nslookup для %s", fqdn)
+		return false
+	}
+
+	if resolvedIP == recordValue {
+		log.Printf("✓ Запись %s успешно резолвится в %s", fqdn, resolvedIP)
+		return true
+	}
+
+	log.Printf("✗ Запись %s не резолвится (ожидалось %s, получено %s)", fqdn, recordValue, resolvedIP)
+	return false
+}
+
+// parseNslookupForIP извлекает IPv4-адрес из стандартного вывода утилиты nslookup
+func parseNslookupForIP(output string) string {
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := scanner.Text()
+		// Игнорируем строки, которые не содержат информации об адресе
+		if !strings.Contains(line, "Address") && !strings.Contains(line, "address") {
+			continue
+		}
+
+		// Пропускаем строку с адресом DNS-сервера (обычно "Address: 100.69.13.4#53")
+		if strings.Contains(line, "#") {
+			continue
+		}
+
+		// Пытаемся найти IPv4-адрес в строке.
+		// Используем простой подход: ищем любую последовательность из 4 чисел, разделенных точками.
+		// Это основной, но достаточный для большинства случаев метод.
+		parts := strings.Fields(line)
+		for _, part := range parts {
+			if IsIPv4(part) {
+				return part
+			}
+		}
+	}
+	return ""
+}
+
+// GetMasterZonesList получает список всех зон с мастера
+func (r *ReplicaSync) GetMasterZonesList() ([]struct {
+	ZoneName string `json:"zone_name"`
+}, error) {
+	urlZ := fmt.Sprintf("%s/api/sync/zones", r.MasterURL)
+
+	req, err := http.NewRequest("GET", urlZ, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("X-Sync-Token", r.APIToken)
+
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var response struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Zones []struct {
+				ZoneName string `json:"zone_name"`
+			} `json:"zones"`
+		} `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, err
+	}
+
+	return response.Data.Zones, nil
+}
+
+// GetZoneARecordsFromMaster получает все A записи зоны с мастера через API
+func (r *ReplicaSync) GetZoneARecordsFromMaster(zoneName string) ([]RecordInfo, error) {
+	urlZ := fmt.Sprintf("%s/api/sync/zone/%s/records", r.MasterURL, zoneName)
+
+	req, err := http.NewRequest("GET", urlZ, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("X-Sync-Token", r.APIToken)
+
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("мастер вернул код %d", resp.StatusCode)
+	}
+
+	var response struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Records []RecordInfo `json:"records"`
+		} `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, err
+	}
+
+	if !response.Success {
+		return nil, fmt.Errorf("мастер вернул ошибку")
+	}
+
+	return response.Data.Records, nil
+}
+
+// CheckAndFixZones проверяет все зоны и делает retransfer если нужно
+func (r *ReplicaSync) CheckAndFixZones() error {
+	if !r.Enabled {
+		return nil
+	}
+
+	// Получаем список всех зон с мастера
+	zones, err := r.GetMasterZonesList()
+	if err != nil {
+		return fmt.Errorf("ошибка получения списка зон: %v", err)
+	}
+
+	for _, zone := range zones {
+		// Получаем все A записи зоны с мастера
+		records, err := r.GetZoneARecordsFromMaster(zone.ZoneName)
+		if err != nil {
+			log.Printf("Ошибка получения A записей для зоны %s: %v", zone.ZoneName, err)
+			continue
+		}
+
+		// Проверяем каждую A запись
+		needRetransfer := false
+		for _, record := range records {
+			if !r.CheckARecordResolve(zone.ZoneName, record.Name, record.Value) {
+				needRetransfer = true
+				break
+			}
+		}
+
+		// Если хотя бы одна запись не резолвится - делаем retransfer
+		if needRetransfer {
+			log.Printf("Обнаружены проблемы с резолвингом зоны %s, выполняем retransfer", zone.ZoneName)
+
+			cmd := exec.Command("rndc", "retransfer", zone.ZoneName)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				log.Printf("Ошибка retransfer для зоны %s: %v, output: %s", zone.ZoneName, err, string(output))
+				continue
+			}
+
+			log.Printf("Retransfer для зоны %s выполнен успешно", zone.ZoneName)
+
+			// После retransfer делаем паузу и проверяем снова
+			time.Sleep(2 * time.Second)
+
+			// Повторная проверка после retransfer
+			allResolved := true
+			for _, record := range records {
+				if !r.CheckARecordResolve(zone.ZoneName, record.Name, record.Value) {
+					allResolved = false
+					log.Printf("После retransfer запись %s.%s всё ещё не резолвится", record.Name, zone.ZoneName)
+				}
+			}
+
+			if allResolved {
+				log.Printf("✓ Зона %s полностью синхронизирована", zone.ZoneName)
+			} else {
+				log.Printf("⚠ После retransfer зона %s всё ещё имеет проблемы", zone.ZoneName)
+			}
+		}
+	}
+
+	return nil
 }

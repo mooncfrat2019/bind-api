@@ -161,6 +161,8 @@ type ReplicaSync struct {
 	isSyncing         bool
 	lastSyncTime      time.Time
 	filesUpdatedCount int
+	syncCount         int                  // Счётчик циклов
+	checkedZones      map[string]time.Time // Отслеживание проверенных зон
 }
 
 type ConfigTransform struct {

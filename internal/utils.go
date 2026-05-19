@@ -307,3 +307,22 @@ func generateSecureKey() string {
 	}
 	return hex.EncodeToString(b)
 }
+
+// isIPv4 проверяет, является ли строка корректным IPv4-адресом
+func IsIPv4(ip string) bool {
+	octets := strings.Split(ip, ".")
+	if len(octets) != 4 {
+		return false
+	}
+	for _, octet := range octets {
+		if len(octet) == 0 || len(octet) > 3 {
+			return false
+		}
+		for _, ch := range octet {
+			if ch < '0' || ch > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
