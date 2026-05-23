@@ -1,8 +1,8 @@
 # 📘 BIND Manager API
 
 **Репозиторий:** [github.com/mooncfrat2019/bind-api](https://github.com/mooncfrat2019/bind-api)  
-**Версия:** 0.3.0  
-**Последнее обновление:** Март 2026
+**Версия:** 0.4.0  
+**Последнее обновление:** Май 2026
 
 ---
 
@@ -16,8 +16,9 @@
 6. [Авторизация и безопасность](#6-авторизация-и-безопасность)
 7. [Версионирование и откат](#7-версионирование-и-откат)
 8. [Master-Replica синхронизация](#8-master-replica-синхронизация)
-9. [Мониторинг и отладка](#9-мониторинг-и-отладка)
-10. [Troubleshooting](#10-troubleshooting)
+9. [Автоматическая проверка A-записей](#9-автоматическая-проверка-a-записей)
+10. [Мониторинг и отладка](#10-мониторинг-и-отладка)
+11. [Troubleshooting](#11-troubleshooting)
 
 ---
 
@@ -34,11 +35,12 @@
 | Reverse DNS | Автоматическое создание PTR записей |
 | Очередь заданий | Последовательная обработка для защиты от race conditions |
 | Аудит операций | Полное логирование всех изменений в PostgreSQL |
-| Валидация | Проверка синтаксиса перед применением (`named-checkconf`, `named-checkzone`) |
+| Валидация | Проверка синтаксиса перед применением |
 | Serial management | Автоматическое увеличение Serial при изменениях |
 | Версионирование | Сохранение всех версий конфигов с возможностью отката |
 | Master-Replica | Автоматическая синхронизация конфигурации между серверами |
 | Трансформация конфигов | Автоматическая конвертация master→slave при синхронизации |
+| **Автопроверка A-записей (v0.4.0)** | Реплика автоматически проверяет резолвинг и вызывает retransfer |
 | API-ключи | Гибкая система авторизации с правами доступа |
 
 ### Технологии
@@ -61,9 +63,9 @@ bind-api/
 ├── README.md               # Документация
 ├── .env.example            # Пример конфигурации
 └── internal/
-    ├── vars.go             # Глобальные переменные (Db, SH, RS, JQ, AppRole)
-    ├── consts.go           # Константы (пути, таймауты, настройки)
-    ├── types.go            # Модели (SyncState, AuditLog, Job, APIKey)
+    ├── vars.go             # Глобальные переменные
+    ├── consts.go           # Константы
+    ├── types.go            # Модели данных
     ├── handlers.go         # HTTP-хендлеры
     ├── methods.go          # Бизнес-логика и middleware
     └── utils.go            # Вспомогательные функции
@@ -90,7 +92,9 @@ bind-api/
 9. (MASTER) → Обновляет sync_states для реплик
 10. (REPLICA) → Периодически опрашивает /api/sync/state
 11. (REPLICA) → Скачивает изменённые конфиги → трансформирует → сохраняет
-12. (REPLICA) → Перезагружает BIND при изменениях
+12. (REPLICA) → Проверяет резолвинг A-записей
+13. (REPLICA) → При необходимости выполняет rndc retransfer
+14. (REPLICA) → Перезагружает BIND при изменениях
 
 ### 2.2. Master-Replica синхронизация
 
@@ -104,6 +108,7 @@ bind-api/
 | Файлы зон | Создаёт/изменяет | Получает через BIND AXFR |
 | База данных | Хранит версии и аудит | Опционально |
 | Трансформация | Отдаёт "сырой" конфиг | Применяет трансформации |
+| **Проверка A-записей (v0.4.0)** | — | Проверяет резолвинг через nslookup |
 
 ### 2.3. Авторизация
 
@@ -228,6 +233,7 @@ REPLICA_ZONE_TYPE=slave
 REPLICA_ZONE_SUBDIR=slaves
 REPLICA_REMOVE_ALLOW_TRANSFER=true
 REPLICA_DISABLE_IPV6=true
+REPLICA_EXTERNAL_IP=10.69.13.10   # IP реплики для самопроверки
 
 # Запуск
 sudo ./bind-api
@@ -263,6 +269,7 @@ sudo ./bind-api
 | `REPLICA_ZONE_SUBDIR` | `slaves` | Подкаталог для файлов зон |
 | `REPLICA_REMOVE_ALLOW_TRANSFER` | `false` | Удалять `allow-transfer` на реплике |
 | `REPLICA_DISABLE_IPV6` | `false` | Отключать IPv6 на реплике |
+| **`REPLICA_EXTERNAL_IP` (v0.4.0)** | `127.0.0.1` | Внешний IP реплики для проверки резолвинга |
 
 ---
 
@@ -325,6 +332,7 @@ sudo ./bind-api
 | `GET` | `/sync/file` | Получить файл (query params) |
 | `GET` | `/sync/zones` | Список зон для синхронизации |
 | `GET` | `/sync/zone/:zoneName` | Получить зону |
+| `GET` | `/sync/zone/:zoneName/records` | **Получить A/AAAA записи зоны (v0.4.0)** |
 | `GET` | `/sync/versions/:fileType` | Список версий файла |
 | `GET` | `/sync/version/:id` | Конкретная версия |
 | `POST` | `/sync/version/:id/rollback` | Откат к версии |
@@ -348,6 +356,13 @@ curl -X POST http://localhost:8080/api/write/zone/test.local/record \
   -H "Content-Type: application/json" \
   -H "X-API-Key: <...>" \
   -d '{"name": "www", "type": "A", "value": "192.168.1.100"}'
+```
+
+#### Получение A-записей зоны (v0.4.0)
+
+```bash
+curl -H "X-Sync-Token: <...>" \
+  http://localhost:8080/api/sync/zone/test.local/records
 ```
 
 #### Создание API-ключа
@@ -410,14 +425,6 @@ CREATE TABLE api_keys (
 - **Срок действия:** Ключи могут иметь дату истечения
 - **Аудит:** Все запросы логируются с указанием ключа
 
-### 6.4. Рекомендации для продакшена
-
-1. Использовать HTTPS (nginx reverse proxy)
-2. Регулярно ротировать ключи
-3. Использовать минимальные необходимые права
-4. Включить rate limiting
-5. Настроить алерты на подозрительную активность
-
 ---
 
 ## 7. Версионирование и откат
@@ -448,27 +455,6 @@ CREATE TABLE sync_states (
 );
 ```
 
-### 7.3. Сценарии использования
-
-#### Просмотр истории
-
-```bash
-curl -H "X-Sync-Token: <...>" \
-  "http://master:8080/api/sync/versions/zone_file?fileName=%2Fvar%2Fnamed%2Ftest.local.zone"
-```
-
-#### Откат после ошибочного изменения
-
-```bash
-# 1. Получить список версий
-curl -H "X-Sync-Token: <...>" \
-  "http://master:8080/api/sync/versions/zone_file?fileName=..."
-
-# 2. Откатиться к версии
-curl -X POST -H "X-Sync-Token: <...>" \
-  http://master:8080/api/sync/version/<ID>/rollback
-```
-
 ---
 
 ## 8. Master-Replica синхронизация
@@ -484,42 +470,57 @@ curl -X POST -H "X-Sync-Token: <...>" \
 | `allow-transfer` | `{ ... }` | удаляется |
 | `listen-on-v6` | `{ any; }` | `{ none; }` |
 
-### 8.2. Настройка BIND для zone transfer
+---
 
-**На мастере:**
-```bind
-options {
-    allow-transfer { 10.69.13.4; localhost; };
-    also-notify { 10.69.13.4; };
-};
+## 9. Автоматическая проверка A-записей (v0.4.0)
+
+### 9.1. Принцип работы
+
+Реплика при каждом цикле синхронизации:
+
+1. Получает список всех зон с мастера (`/api/sync/zones`)
+2. Для каждой зоны получает список A/AAAA записей (`/api/sync/zone/:name/records`)
+3. Проверяет резолвинг каждой записи через `nslookup` на своём DNS-сервере
+4. Если хотя бы одна запись не резолвится → выполняет `rndc retransfer`
+5. Повторяет проверку после retransfer
+
+### 9.2. Логирование
+
+```
+=== Начинаем проверку зон и A записей ===
+Проверка резолвинга test.space.space через реплику 10.69.13.10, ожидается 10.10.100.2
+✓ Запись test.space.space успешно резолвится в 10.10.100.2
+Обнаружены проблемы с резолвингом зоны space.space, выполняем retransfer
+Retransfer для зоны space.space выполнен успешно
+✓ Зона space.space полностью синхронизирована
+=== Проверка зон завершена ===
 ```
 
-**На реплике (после трансформации):**
-```bind
-zone "test.local" IN {
-    type slave;
-    masters { 10.69.13.3; };
-    file "slaves/test.local.zone";
-};
-```
+### 9.3. Парсинг вывода nslookup
+
+Функция `parseNslookupForIP` извлекает IPv4-адрес из вывода `nslookup`, игнорируя:
+- Строки с адресом DNS-сервера (содержат `#`)
+- Строки без ключевых слов `Address`/`address`
+
+Поддерживаются различные форматы вывода в разных ОС.
 
 ---
 
-## 9. Мониторинг и отладка
+## 10. Мониторинг и отладка
 
-### 9.1. Логи приложения
+### 10.1. Логи приложения
 
 ```bash
 sudo journalctl -u bind-api -f
 ```
 
-### 9.2. Проверка очереди
+### 10.2. Проверка очереди
 
 ```bash
 curl http://localhost:8080/api/status | jq '.data.queue_size'
 ```
 
-### 9.3. Проверка БД
+### 10.3. Проверка БД
 
 ```bash
 PGPASSWORD=password psql -h localhost -U dns -d dns
@@ -536,9 +537,9 @@ ORDER BY version DESC;
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
-### 10.1. Частые проблемы
+### 11.1. Частые проблемы
 
 | Проблема | Причина | Решение |
 |----------|---------|---------|
@@ -547,8 +548,9 @@ ORDER BY version DESC;
 | `401 Unauthorized` | Нет API-ключа | Добавить `X-API-Key` заголовок |
 | `403 Forbidden` | Недостаточно прав | Проверить permissions ключа |
 | `zone transfer failed` | Не настроен allow-transfer | Добавить на мастере |
+| **Запись не резолвится на реплике (v0.4.0)** | Не выполнен retransfer | Проверить логи, REPLICA_EXTERNAL_IP |
 
-### 10.2. Диагностика
+### 11.2. Диагностика
 
 ```bash
 # Проверить права
@@ -560,6 +562,20 @@ sudo rndc status
 # Проверить синтаксис
 sudo named-checkconf
 sudo named-checkzone test.local /var/named/test.local.zone
+
+# Принудительный retransfer зоны
+sudo rndc retransfer test.local
+
+# Проверка резолвинга через реплику
+nslookup test.local 100.69.13.4
+```
+
+### 11.3. Логи синхронизации зон
+
+Для отладки проблем с синхронизацией зон выполните на реплике:
+
+```bash
+sudo journalctl -u bind-api -f | grep -E "(CheckARecordResolve|retransfer|зон)"
 ```
 
 ---
@@ -573,5 +589,8 @@ sudo named-checkzone test.local /var/named/test.local.zone
 3. Проверьте синтаксис BIND (`named-checkconf`)
 4. Проверьте права на файлы
 5. Убедитесь что API-ключ действителен и имеет нужные права
+6. **Для проблем с синхронизацией зон** проверьте `REPLICA_EXTERNAL_IP` и доступность DNS
 
 ---
+
+**© 2026 BIND Manager API | Версия 0.4.0**
