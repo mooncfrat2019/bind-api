@@ -31,8 +31,14 @@ var (
 	RS *ReplicaSync // Только REPLICA
 
 	// Очередь заданий (только MASTER)
-	JQ      chan *Job
-	JQMutex sync.Mutex
+	JQ            chan *Job
+	JQMutex       sync.Mutex
+	BatchJobs     []*Job // Буфер для пакетной обработки
+	BatchMutex    sync.Mutex
+	BatchFlushCh  chan struct{} // Сигнал для принудительного сброса пакета
+	CurrentMode   string        // "normal" или "batch"
+	ModeMutex     sync.RWMutex
+	PendingReload bool
 
 	// Блокировки файлов
 	FileLocks      = make(map[string]*sync.Mutex)

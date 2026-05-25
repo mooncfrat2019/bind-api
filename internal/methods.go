@@ -169,10 +169,209 @@ func InitDatabase() error {
 	return nil
 }
 
+// queueMonitor отслеживает размер очереди и переключает режимы
+func queueMonitor() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		queueSize := len(JQ)
+		queuePercent := float64(queueSize) / float64(MaxQueueSize)
+
+		ModeMutex.RLock()
+		currentMode := CurrentMode
+		ModeMutex.RUnlock()
+
+		if currentMode == "normal" && queuePercent >= QueueThresholdHigh {
+			ModeMutex.Lock()
+			CurrentMode = "batch"
+			ModeMutex.Unlock()
+			log.Printf("🔄 Переключение в BATCH режим (очередь: %.1f%%, %d/%d)",
+				queuePercent*100, queueSize, MaxQueueSize)
+
+			// Принудительный сброс накопленных заданий
+			select {
+			case BatchFlushCh <- struct{}{}:
+			default:
+			}
+		} else if currentMode == "batch" && queuePercent <= QueueThresholdLow {
+			ModeMutex.Lock()
+			CurrentMode = "normal"
+			ModeMutex.Unlock()
+			log.Printf("🔄 Переключение в NORMAL режим (очередь: %.1f%%, %d/%d)",
+				queuePercent*100, queueSize, MaxQueueSize)
+
+			// Сбрасываем накопленный пакет
+			flushBatch()
+		}
+	}
+}
+
+// adaptiveWorker обрабатывает задания в зависимости от режима
+func adaptiveWorker() {
+	for job := range JQ {
+		ModeMutex.RLock()
+		mode := CurrentMode
+		ModeMutex.RUnlock()
+
+		if mode == "normal" {
+			// Normal режим: обрабатываем сразу
+			processJob(job)
+		} else {
+			// Batch режим: накапливаем задания
+			addToBatch(job)
+		}
+	}
+}
+
+// addToBatch добавляет задание в пакет
+func addToBatch(job *Job) {
+	BatchMutex.Lock()
+	defer BatchMutex.Unlock()
+
+	BatchJobs = append(BatchJobs, job)
+
+	// Если набрали достаточно заданий или получили сигнал сброса
+	if len(BatchJobs) >= BatchSize {
+		go flushBatch()
+	}
+}
+
+// flushBatch сбрасывает накопленные задания и применяет их пакетом
+func flushBatch() {
+	BatchMutex.Lock()
+	if len(BatchJobs) == 0 {
+		BatchMutex.Unlock()
+		return
+	}
+
+	// Копируем задания
+	jobs := make([]*Job, len(BatchJobs))
+	copy(jobs, BatchJobs)
+	BatchJobs = BatchJobs[:0] // Очищаем
+	BatchMutex.Unlock()
+
+	if len(jobs) == 0 {
+		return
+	}
+
+	log.Printf("📦 Применение пакета из %d заданий", len(jobs))
+	startTime := time.Now()
+
+	// Группируем задания по зонам
+	jobsByZone := make(map[string][]*Job)
+	for _, job := range jobs {
+		jobsByZone[job.ZoneName] = append(jobsByZone[job.ZoneName], job)
+	}
+
+	// Применяем задания для каждой зоны
+	for zoneName, zoneJobs := range jobsByZone {
+		zone, exists := getZoneFromConfig(zoneName)
+		if !exists {
+			log.Printf("Зона %s не найдена, пропускаем %d заданий", zoneName, len(zoneJobs))
+			continue
+		}
+
+		// Блокируем файл зоны на время пакетной обработки
+		err := withFileLock(zone.File, func() error {
+			for _, job := range zoneJobs {
+				// Применяем задание без отдельной блокировки
+				switch job.Type {
+				case JobAddRecord:
+					applyAddRecordToFile(job, zone)
+				case JobDeleteRecord:
+					applyDeleteRecordToFile(job, zone)
+				}
+			}
+			// Один раз увеличиваем serial для всех изменений в зоне
+			if err := incrementSerial(zone.File); err != nil {
+				log.Printf("Ошибка обновления serial для зоны %s: %v", zoneName, err)
+			}
+			return nil
+		})
+
+		if err != nil {
+			log.Printf("Ошибка пакетной обработки зоны %s: %v", zoneName, err)
+			// Отмечаем задания как упавшие
+			for _, job := range zoneJobs {
+				logAudit(job, "FAILED", err.Error())
+				job.ResponseCh <- JobResult{Success: false, Error: err}
+				close(job.ResponseCh)
+			}
+			continue
+		}
+
+		// Все задания успешно выполнены
+		for _, job := range zoneJobs {
+			logAudit(job, "COMPLETED", "")
+			job.ResponseCh <- JobResult{Success: true, Message: "Запись добавлена (batch)"}
+			close(job.ResponseCh)
+		}
+
+		fixPermissions(zone.File)
+	}
+
+	// Отмечаем что нужен reload
+	PendingReload = true
+
+	elapsed := time.Since(startTime)
+	log.Printf("✅ Пакет из %d заданий применён за %v", len(jobs), elapsed)
+}
+
+// applyAddRecordToFile применяет добавление записи к файлу (без блокировок)
+func applyAddRecordToFile(job *Job, zone *ZoneConfig) error {
+	ttl := job.TTL
+	if ttl == 0 {
+		ttl = DefaultTTL
+	}
+
+	recordLine := fmt.Sprintf("%s\t%d\tIN\t%s\t%s",
+		job.RecordName, ttl, strings.ToUpper(job.RecordType), job.RecordValue)
+
+	return appendRecordToFile(zone.File, recordLine)
+}
+
+// applyDeleteRecordToFile применяет удаление записи из файла (без блокировок)
+func applyDeleteRecordToFile(job *Job, zone *ZoneConfig) error {
+	return deleteRecordFromFile(zone.File, job.RecordName, strings.ToUpper(job.RecordType))
+}
+
+// batchReloadWorker выполняет периодический reload в batch режиме
+func batchReloadWorker() {
+	ticker := time.NewTicker(ReloadInterval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		ModeMutex.RLock()
+		mode := CurrentMode
+		ModeMutex.RUnlock()
+
+		if mode == "batch" && PendingReload {
+			if err := reloadBind(); err != nil {
+				log.Printf("❌ Периодический reload failed: %v", err)
+			} else {
+				log.Printf("🔄 Периодический reload BIND выполнен")
+				PendingReload = false
+			}
+		}
+	}
+}
+
 func InitJobQueue() {
 	JQ = make(chan *Job, MaxQueueSize)
-	go jobWorker()
-	log.Println("Очередь заданий инициализирована")
+	BatchJobs = make([]*Job, 0, BatchSize)
+	BatchFlushCh = make(chan struct{}, 1)
+
+	// Запускаем главный воркер
+	go adaptiveWorker()
+
+	// Запускаем мониторинг очереди для переключения режимов
+	go queueMonitor()
+
+	// Запускаем периодический reload для batch-режима
+	go batchReloadWorker()
+
+	log.Printf("Адаптивная очередь заданий инициализирована")
 }
 
 func jobWorker() {
@@ -821,8 +1020,20 @@ zone "%s" IN {
 		return JobResult{Success: false, Error: fmt.Errorf("ошибка в файле зоны: %s", string(out))}
 	}
 
-	if err := reloadBind(); err != nil {
-		return JobResult{Success: false, Error: err}
+	// Новая логика reload
+	ModeMutex.RLock()
+	currentMode := CurrentMode
+	ModeMutex.RUnlock()
+
+	if currentMode == "normal" {
+		if err := reloadBind(); err != nil {
+			log.Printf("WARNING: reload после создания зоны %s не выполнен: %v", job.ZoneName, err)
+		} else {
+			log.Printf("✓ Reload выполнен после создания зоны %s", job.ZoneName)
+		}
+	} else {
+		PendingReload = true
+		log.Printf("📦 Batch режим: создана зона %s, reload будет выполнен позже", job.ZoneName)
 	}
 
 	// Обновляем состояние для синхронизации
@@ -878,8 +1089,20 @@ func executeDeleteZone(job *Job) JobResult {
 		return JobResult{Success: false, Error: fmt.Errorf("ошибка в конфигурации: %s", string(out))}
 	}
 
-	if err := reloadBind(); err != nil {
-		return JobResult{Success: false, Error: err}
+	// Новая логика reload
+	ModeMutex.RLock()
+	currentMode := CurrentMode
+	ModeMutex.RUnlock()
+
+	if currentMode == "normal" {
+		if err := reloadBind(); err != nil {
+			log.Printf("WARNING: reload после создания зоны %s не выполнен: %v", job.ZoneName, err)
+		} else {
+			log.Printf("✓ Reload выполнен после создания зоны %s", job.ZoneName)
+		}
+	} else {
+		PendingReload = true
+		log.Printf("📦 Batch режим: создана зона %s, reload будет выполнен позже", job.ZoneName)
 	}
 
 	// Обновляем состояние для синхронизации
@@ -908,11 +1131,12 @@ func executeAddRecord(job *Job) JobResult {
 	}
 
 	recordType := strings.ToUpper(job.RecordType)
-	if recordType != "A" && recordType != "AAAA" && recordType != "CNAME" && recordType != "MX" && recordType != "TXT" && recordType != "NS" {
+	if recordType != "A" && recordType != "AAAA" && recordType != "CNAME" &&
+		recordType != "MX" && recordType != "TXT" && recordType != "NS" {
 		return JobResult{Success: false, Error: fmt.Errorf("поддерживаются только A, AAAA, CNAME, MX, TXT, NS")}
 	}
 
-	// Валидация IP для A/AAAA записей
+	// Валидация IP
 	if recordType == "A" {
 		ip := net.ParseIP(job.RecordValue)
 		if ip == nil || ip.To4() == nil {
@@ -936,7 +1160,8 @@ func executeAddRecord(job *Job) JobResult {
 		ttl = DefaultTTL
 	}
 
-	recordLine := fmt.Sprintf("%s\t%d\tIN\t%s\t%s", job.RecordName, ttl, recordType, job.RecordValue)
+	recordLine := fmt.Sprintf("%s\t%d\tIN\t%s\t%s",
+		job.RecordName, ttl, recordType, job.RecordValue)
 
 	err := withFileLock(zone.File, func() error {
 		if err := appendRecordToFile(zone.File, recordLine); err != nil {
@@ -949,10 +1174,7 @@ func executeAddRecord(job *Job) JobResult {
 	}
 
 	// === АВТО-СОЗДАНИЕ ОБРАТНОЙ ЗОНЫ И PTR ЗАПИСИ ===
-	// Только для A/AAAA записей
 	if (recordType == "A" || recordType == "AAAA") && job.RecordValue != "" {
-		// 1. Создаём обратную зону если её нет
-		// ensureReverseZoneExists теперь сама запишет в NamedConf
 		zoneEmail := "admin." + job.ZoneName
 		zoneNsIP := ""
 		serverIPs := getServerIPs()
@@ -962,13 +1184,10 @@ func executeAddRecord(job *Job) JobResult {
 
 		if err := ensureReverseZoneExists(job.RecordValue, zoneEmail, zoneNsIP); err != nil {
 			log.Printf("WARNING: Не удалось создать обратную зону для %s: %v", job.RecordValue, err)
-			// Не прерываем выполнение — продолжаем добавление записи
 		}
 
-		// 2. Добавляем PTR запись если задан reverse_ptr или генерируем автоматически
 		ptrName := job.ReversePtr
 		if ptrName == "" {
-			// Авто-генерация: www.test.local -> www.test.local.
 			ptrName = job.RecordName + "." + job.ZoneName
 			if !strings.HasSuffix(ptrName, ".") {
 				ptrName += "."
@@ -979,10 +1198,6 @@ func executeAddRecord(job *Job) JobResult {
 
 		if err := addPtrRecord(job.RecordValue, ptrName, ttl); err != nil {
 			log.Printf("WARNING: Не удалось создать PTR запись: %v", err)
-			return JobResult{
-				Success: true,
-				Message: "Запись добавлена (PTR не создана: " + err.Error() + ")",
-			}
 		}
 	}
 
@@ -990,8 +1205,23 @@ func executeAddRecord(job *Job) JobResult {
 		return JobResult{Success: false, Error: fmt.Errorf("ошибка прав: %v", err)}
 	}
 
-	if err := reloadBind(); err != nil {
-		return JobResult{Success: false, Error: err}
+	// ========== НОВАЯ ЛОГИКА RELOAD ==========
+	ModeMutex.RLock()
+	currentMode := CurrentMode
+	ModeMutex.RUnlock()
+
+	if currentMode == "normal" {
+		// Единичная запись - делаем reload сразу
+		if err := reloadBind(); err != nil {
+			log.Printf("WARNING: reload после добавления записи %s не выполнен: %v", job.RecordName, err)
+			// Не возвращаем ошибку, запись уже добавлена
+		} else {
+			log.Printf("✓ Reload выполнен после добавления записи %s", job.RecordName)
+		}
+	} else {
+		// Batch режим - только отмечаем что нужен reload
+		PendingReload = true
+		log.Printf("📦 Batch режим: добавлена запись %s, reload будет выполнен позже", job.RecordName)
 	}
 
 	// Обновляем состояние для синхронизации
@@ -1047,8 +1277,20 @@ func executeDeleteRecord(job *Job) JobResult {
 		return JobResult{Success: false, Error: fmt.Errorf("ошибка прав: %v", err)}
 	}
 
-	if err := reloadBind(); err != nil {
-		return JobResult{Success: false, Error: err}
+	// Новая логика reload
+	ModeMutex.RLock()
+	currentMode := CurrentMode
+	ModeMutex.RUnlock()
+
+	if currentMode == "normal" {
+		if err := reloadBind(); err != nil {
+			log.Printf("WARNING: reload после создания зоны %s не выполнен: %v", job.ZoneName, err)
+		} else {
+			log.Printf("✓ Reload выполнен после создания зоны %s", job.ZoneName)
+		}
+	} else {
+		PendingReload = true
+		log.Printf("📦 Batch режим: создана зона %s, reload будет выполнен позже", job.ZoneName)
 	}
 
 	// Обновляем состояние для синхронизации
@@ -2480,4 +2722,84 @@ func (r *ReplicaSync) CheckAndFixZones() error {
 	}
 
 	return nil
+}
+
+// InitQueueConfig инициализирует конфигурацию очереди из переменных окружения
+func InitQueueConfig() {
+	// MaxQueueSize
+	if val := os.Getenv("MAX_QUEUE_SIZE"); val != "" {
+		if i, err := strconv.Atoi(val); err == nil && i > 0 {
+			MaxQueueSize = i
+		}
+	}
+	if MaxQueueSize == 0 {
+		MaxQueueSize = DefaultMaxQueueSize
+	}
+
+	// WorkerTimeout
+	if val := os.Getenv("WORKER_TIMEOUT"); val != "" {
+		if i, err := strconv.Atoi(val); err == nil && i > 0 {
+			WorkerTimeout = time.Duration(i) * time.Second
+		}
+	}
+	if WorkerTimeout == 0 {
+		WorkerTimeout = DefaultWorkerTimeout
+	}
+
+	// BatchSize
+	if val := os.Getenv("BATCH_SIZE"); val != "" {
+		if i, err := strconv.Atoi(val); err == nil && i > 0 {
+			BatchSize = i
+		}
+	}
+	if BatchSize == 0 {
+		BatchSize = DefaultBatchSize
+	}
+
+	// BatchInterval
+	if val := os.Getenv("BATCH_INTERVAL"); val != "" {
+		if i, err := strconv.Atoi(val); err == nil && i > 0 {
+			BatchInterval = time.Duration(i) * time.Second
+		}
+	}
+	if BatchInterval == 0 {
+		BatchInterval = DefaultBatchInterval
+	}
+
+	// QueueThresholdLow
+	if val := os.Getenv("QUEUE_THRESHOLD_LOW"); val != "" {
+		if f, err := strconv.ParseFloat(val, 64); err == nil && f > 0 {
+			QueueThresholdLow = f
+		}
+	}
+	if QueueThresholdLow == 0 {
+		QueueThresholdLow = DefaultQueueThresholdLow
+	}
+
+	// QueueThresholdHigh
+	if val := os.Getenv("QUEUE_THRESHOLD_HIGH"); val != "" {
+		if f, err := strconv.ParseFloat(val, 64); err == nil && f > 0 {
+			QueueThresholdHigh = f
+		}
+	}
+	if QueueThresholdHigh == 0 {
+		QueueThresholdHigh = DefaultQueueThresholdHigh
+	}
+
+	// ReloadInterval
+	if val := os.Getenv("RELOAD_INTERVAL"); val != "" {
+		if i, err := strconv.Atoi(val); err == nil && i > 0 {
+			ReloadInterval = time.Duration(i) * time.Second
+		}
+	}
+	if ReloadInterval == 0 {
+		ReloadInterval = DefaultReloadInterval
+	}
+
+	BatchFlushCh = make(chan struct{}, 1)
+	BatchJobs = make([]*Job, 0, BatchSize)
+	CurrentMode = "normal"
+
+	log.Printf("Очередь инициализирована: MaxSize=%d, BatchSize=%d, BatchInterval=%v, ThresholdLow=%.0f%%, ThresholdHigh=%.0f%%",
+		MaxQueueSize, BatchSize, BatchInterval, QueueThresholdLow*100, QueueThresholdHigh*100)
 }

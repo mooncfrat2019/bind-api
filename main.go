@@ -37,6 +37,7 @@ func main() {
 	}
 
 	app.InitConfig()
+	app.InitQueueConfig()
 
 	// Определяем роль
 	app.AppRole = os.Getenv("APP_ROLE")
