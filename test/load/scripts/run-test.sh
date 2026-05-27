@@ -89,7 +89,7 @@ for f in ${RESULT_DIR}/*_report.json; do
         total=$(jq -r '.requests' "$f" 2>/dev/null || echo "0")
         avg=$(jq -r '.latencies.mean' "$f" 2>/dev/null || echo "0")
         p95=$(jq -r '.latencies["95th"]' "$f" 2>/dev/null || echo "0")
-        echo "$name: успешно=$(echo "$success * 100" | bc)% ($total запросов), средняя=$avg мс, p95=$p95 мс"
+        echo "$name: успешно=$success ($total запросов), средняя=$avg мс, p95=$p95 мс"
     fi
 done
 
