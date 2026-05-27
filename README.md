@@ -1,4 +1,4 @@
-# 📘 BIND Manager API
+# 📘 BIND API
 
 **Репозиторий:** [github.com/mooncfrat2019/bind-api](https://github.com/mooncfrat2019/bind-api)  
 **Версия:** 0.4.0  
