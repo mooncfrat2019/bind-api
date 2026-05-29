@@ -90,11 +90,17 @@ func main() {
 		log.Fatalf("Директория зон не существует: %s", app.ZoneDir)
 	}
 
+	app.InitMetrics()
+	app.StartMetricsUpdater()
+
 	gin.SetMode(gin.ReleaseMode)
 
 	r := gin.New()
 	r.Use(loggerMiddleware())
 	r.Use(gin.Recovery())
+	r.Use(app.MetricsMiddleware())
+	r.GET("/metrics", app.MetricsHandler())
+	r.GET("/health", app.HealthHandler)
 	api := r.Group("/api")
 	{
 		api.GET("/status", app.HandleStatus)

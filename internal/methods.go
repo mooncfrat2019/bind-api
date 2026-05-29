@@ -901,8 +901,17 @@ func removeZoneFromConfig(configFile, zoneName string) error {
 // --- Выполнители заданий (только MASTER) ---
 
 func executeCreateZone(job *Job) JobResult {
+	start := time.Now()
+	var err error
+	defer func() {
+		if Metrics != nil {
+			Metrics.RecordOperation("create_zone", time.Since(start), err)
+		}
+	}()
+
 	if !validateZoneName(job.ZoneName) {
-		return JobResult{Success: false, Error: fmt.Errorf("недопустимое имя зоны")}
+		err = fmt.Errorf("недопустимое имя зоны")
+		return JobResult{Success: false, Error: err}
 	}
 
 	email := job.Email
@@ -916,7 +925,8 @@ func executeCreateZone(job *Job) JobResult {
 	}
 
 	if zoneExistsInConfig(job.ZoneName) {
-		return JobResult{Success: false, Error: fmt.Errorf("зона уже существует")}
+		err = fmt.Errorf("зона уже существует")
+		return JobResult{Success: false, Error: err}
 	}
 
 	targetConfigFile := job.ConfigFile
@@ -937,7 +947,8 @@ func executeCreateZone(job *Job) JobResult {
 	}
 
 	if _, err := os.Stat(zoneFile); err == nil {
-		return JobResult{Success: false, Error: fmt.Errorf("файл зоны уже существует")}
+		err = fmt.Errorf("файл зоны уже существует")
+		return JobResult{Success: false, Error: err}
 	}
 
 	now := time.Now()
@@ -971,15 +982,17 @@ ns1	%d	IN	A	%s
 @	%d	IN	A	%s
 `, DefaultTTL, job.ZoneName, soaEmail, serial, DefaultRefresh, DefaultRetry, DefaultExpire, DefaultNegative, job.ZoneName, DefaultTTL, nsIP, DefaultTTL, nsIP)
 
-	err := withFileLock(zoneFile, func() error {
+	err = withFileLock(zoneFile, func() error {
 		return os.WriteFile(zoneFile, []byte(zoneContent), 0644)
 	})
 	if err != nil {
-		return JobResult{Success: false, Error: fmt.Errorf("не удалось создать файл зоны: %v", err)}
+		err = fmt.Errorf("не удалось создать файл зоны: %v", err)
+		return JobResult{Success: false, Error: err}
 	}
 
 	if err := fixPermissions(zoneFile); err != nil {
-		return JobResult{Success: false, Error: fmt.Errorf("ошибка прав доступа: %v", err)}
+		err = fmt.Errorf("ошибка прав доступа: %v", err)
+		return JobResult{Success: false, Error: err}
 	}
 
 	zoneConfig := fmt.Sprintf(`
@@ -1000,7 +1013,8 @@ zone "%s" IN {
 		return err
 	})
 	if err != nil {
-		return JobResult{Success: false, Error: fmt.Errorf("ошибка записи в конфиг: %v", err)}
+		err = fmt.Errorf("ошибка записи в конфиг: %v", err)
+		return JobResult{Success: false, Error: err}
 	}
 
 	cmd := exec.Command("chown", "root:named", targetConfigFile)
@@ -1011,13 +1025,15 @@ zone "%s" IN {
 	cmd = exec.Command("named-checkconf")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return JobResult{Success: false, Error: fmt.Errorf("ошибка в конфигурации: %s", string(out))}
+		err = fmt.Errorf("ошибка в конфигурации: %s", string(out))
+		return JobResult{Success: false, Error: err}
 	}
 
 	cmd = exec.Command("named-checkzone", job.ZoneName, zoneFile)
 	out, err = cmd.CombinedOutput()
 	if err != nil {
-		return JobResult{Success: false, Error: fmt.Errorf("ошибка в файле зоны: %s", string(out))}
+		err = fmt.Errorf("ошибка в файле зоны: %s", string(out))
+		return JobResult{Success: false, Error: err}
 	}
 
 	// Новая логика reload
@@ -1043,6 +1059,11 @@ zone "%s" IN {
 		SH.UpdateSyncState("zone_file", zoneFile, job.ZoneName, zoneFile, "api")
 	}
 
+	// Обновляем бизнес-метрики после создания зоны
+	if Metrics != nil {
+		go Metrics.UpdateBusinessMetrics()
+	}
+
 	return JobResult{
 		Success: true,
 		Message: fmt.Sprintf("Зона %s (%s) создана в %s", job.ZoneName, zoneType, targetConfigFile),
@@ -1055,38 +1076,51 @@ zone "%s" IN {
 }
 
 func executeDeleteZone(job *Job) JobResult {
+	start := time.Now()
+	var err error
+	defer func() {
+		if Metrics != nil {
+			Metrics.RecordOperation("delete_zone", time.Since(start), err)
+		}
+	}()
+
 	if !validateZoneName(job.ZoneName) {
-		return JobResult{Success: false, Error: fmt.Errorf("недопустимое имя зоны")}
+		err = fmt.Errorf("недопустимое имя зоны")
+		return JobResult{Success: false, Error: err}
 	}
 
 	zone, exists := getZoneFromConfig(job.ZoneName)
 	if !exists {
-		return JobResult{Success: false, Error: fmt.Errorf("зона не найдена в конфигурации")}
+		err = fmt.Errorf("зона не найдена в конфигурации")
+		return JobResult{Success: false, Error: err}
 	}
 
 	log.Printf("Удаление зоны %s: файл=%s, конфиг=%s", job.ZoneName, zone.File, zone.ConfigFile)
 
-	err := withFileLock(zone.File, func() error {
+	err = withFileLock(zone.File, func() error {
 		if _, err := os.Stat(zone.File); err == nil {
 			return os.Remove(zone.File)
 		}
 		return nil
 	})
 	if err != nil {
-		return JobResult{Success: false, Error: fmt.Errorf("не удалось удалить файл зоны: %v", err)}
+		err = fmt.Errorf("не удалось удалить файл зоны: %v", err)
+		return JobResult{Success: false, Error: err}
 	}
 
 	err = withFileLock(zone.ConfigFile, func() error {
 		return removeZoneFromConfig(zone.ConfigFile, job.ZoneName)
 	})
 	if err != nil {
+		err = fmt.Errorf("ошибка удаления зоны из конфига: %v", err)
 		return JobResult{Success: false, Error: err}
 	}
 
 	cmd := exec.Command("named-checkconf")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return JobResult{Success: false, Error: fmt.Errorf("ошибка в конфигурации: %s", string(out))}
+		err = fmt.Errorf("ошибка в конфигурации: %s", string(out))
+		return JobResult{Success: false, Error: err}
 	}
 
 	// Новая логика reload
@@ -1096,19 +1130,24 @@ func executeDeleteZone(job *Job) JobResult {
 
 	if currentMode == "normal" {
 		if err := reloadBind(); err != nil {
-			log.Printf("WARNING: reload после создания зоны %s не выполнен: %v", job.ZoneName, err)
+			log.Printf("WARNING: reload после удаления зоны %s не выполнен: %v", job.ZoneName, err)
 		} else {
-			log.Printf("✓ Reload выполнен после создания зоны %s", job.ZoneName)
+			log.Printf("✓ Reload выполнен после удаления зоны %s", job.ZoneName)
 		}
 	} else {
 		PendingReload = true
-		log.Printf("📦 Batch режим: создана зона %s, reload будет выполнен позже", job.ZoneName)
+		log.Printf("📦 Batch режим: удалена зона %s, reload будет выполнен позже", job.ZoneName)
 	}
 
 	// Обновляем состояние для синхронизации
 	if SH != nil {
 		SH.UpdateSyncState("named_conf", NamedConf, "", NamedConf, "api")
 		SH.UpdateSyncState("zone_conf", ZoneConfFile, "", ZoneConfFile, "api")
+	}
+
+	// Обновляем бизнес-метрики после удаления зоны
+	if Metrics != nil {
+		go Metrics.UpdateBusinessMetrics()
 	}
 
 	return JobResult{
@@ -1122,37 +1161,51 @@ func executeDeleteZone(job *Job) JobResult {
 }
 
 func executeAddRecord(job *Job) JobResult {
+	start := time.Now()
+	var err error
+	defer func() {
+		if Metrics != nil {
+			Metrics.RecordOperation("add_record", time.Since(start), err)
+		}
+	}()
+
 	if !validateZoneName(job.ZoneName) {
-		return JobResult{Success: false, Error: fmt.Errorf("недопустимое имя зоны")}
+		err = fmt.Errorf("недопустимое имя зоны")
+		return JobResult{Success: false, Error: err}
 	}
 
 	if !validateRecordName(job.RecordName) {
-		return JobResult{Success: false, Error: fmt.Errorf("недопустимое имя записи")}
+		err = fmt.Errorf("недопустимое имя записи")
+		return JobResult{Success: false, Error: err}
 	}
 
 	recordType := strings.ToUpper(job.RecordType)
 	if recordType != "A" && recordType != "AAAA" && recordType != "CNAME" &&
 		recordType != "MX" && recordType != "TXT" && recordType != "NS" {
-		return JobResult{Success: false, Error: fmt.Errorf("поддерживаются только A, AAAA, CNAME, MX, TXT, NS")}
+		err = fmt.Errorf("поддерживаются только A, AAAA, CNAME, MX, TXT, NS")
+		return JobResult{Success: false, Error: err}
 	}
 
 	// Валидация IP
 	if recordType == "A" {
 		ip := net.ParseIP(job.RecordValue)
 		if ip == nil || ip.To4() == nil {
-			return JobResult{Success: false, Error: fmt.Errorf("неверный IPv4 адрес")}
+			err = fmt.Errorf("неверный IPv4 адрес")
+			return JobResult{Success: false, Error: err}
 		}
 	}
 	if recordType == "AAAA" {
 		ip := net.ParseIP(job.RecordValue)
 		if ip == nil || ip.To4() != nil {
-			return JobResult{Success: false, Error: fmt.Errorf("неверный IPv6 адрес")}
+			err = fmt.Errorf("неверный IPv6 адрес")
+			return JobResult{Success: false, Error: err}
 		}
 	}
 
 	zone, exists := getZoneFromConfig(job.ZoneName)
 	if !exists {
-		return JobResult{Success: false, Error: fmt.Errorf("зона не найдена в конфигурации")}
+		err = fmt.Errorf("зона не найдена в конфигурации")
+		return JobResult{Success: false, Error: err}
 	}
 
 	ttl := job.TTL
@@ -1163,14 +1216,15 @@ func executeAddRecord(job *Job) JobResult {
 	recordLine := fmt.Sprintf("%s\t%d\tIN\t%s\t%s",
 		job.RecordName, ttl, recordType, job.RecordValue)
 
-	err := withFileLock(zone.File, func() error {
+	err = withFileLock(zone.File, func() error {
 		if err := appendRecordToFile(zone.File, recordLine); err != nil {
 			return err
 		}
 		return incrementSerial(zone.File)
 	})
 	if err != nil {
-		return JobResult{Success: false, Error: fmt.Errorf("ошибка записи в файл зоны: %v", err)}
+		err = fmt.Errorf("ошибка записи в файл зоны: %v", err)
+		return JobResult{Success: false, Error: err}
 	}
 
 	// === АВТО-СОЗДАНИЕ ОБРАТНОЙ ЗОНЫ И PTR ЗАПИСИ ===
@@ -1202,7 +1256,8 @@ func executeAddRecord(job *Job) JobResult {
 	}
 
 	if err := fixPermissions(zone.File); err != nil {
-		return JobResult{Success: false, Error: fmt.Errorf("ошибка прав: %v", err)}
+		err = fmt.Errorf("ошибка прав: %v", err)
+		return JobResult{Success: false, Error: err}
 	}
 
 	// ========== НОВАЯ ЛОГИКА RELOAD ==========
@@ -1230,21 +1285,37 @@ func executeAddRecord(job *Job) JobResult {
 		SH.UpdateSyncState("named_conf", NamedConf, "", NamedConf, "api")
 	}
 
+	// Обновляем метрики записей
+	if Metrics != nil {
+		go Metrics.UpdateBusinessMetrics()
+	}
+
 	return JobResult{Success: true, Message: "Запись добавлена"}
 }
 
 func executeDeleteRecord(job *Job) JobResult {
+	start := time.Now()
+	var err error
+	defer func() {
+		if Metrics != nil {
+			Metrics.RecordOperation("delete_record", time.Since(start), err)
+		}
+	}()
+
 	if !validateZoneName(job.ZoneName) {
-		return JobResult{Success: false, Error: fmt.Errorf("недопустимое имя зоны")}
+		err = fmt.Errorf("недопустимое имя зоны")
+		return JobResult{Success: false, Error: err}
 	}
 
 	if !validateRecordName(job.RecordName) {
-		return JobResult{Success: false, Error: fmt.Errorf("недопустимое имя записи")}
+		err = fmt.Errorf("недопустимое имя записи")
+		return JobResult{Success: false, Error: err}
 	}
 
 	zone, exists := getZoneFromConfig(job.ZoneName)
 	if !exists {
-		return JobResult{Success: false, Error: fmt.Errorf("зона не найдена в конфигурации")}
+		err = fmt.Errorf("зона не найдена в конфигурации")
+		return JobResult{Success: false, Error: err}
 	}
 
 	recordType := strings.ToUpper(job.RecordType)
@@ -1263,18 +1334,20 @@ func executeDeleteRecord(job *Job) JobResult {
 		}
 	}
 
-	err := withFileLock(zone.File, func() error {
+	err = withFileLock(zone.File, func() error {
 		if err := deleteRecordFromFile(zone.File, job.RecordName, recordType); err != nil {
 			return err
 		}
 		return incrementSerial(zone.File)
 	})
 	if err != nil {
-		return JobResult{Success: false, Error: fmt.Errorf("ошибка удаления записи: %v", err)}
+		err = fmt.Errorf("ошибка удаления записи: %v", err)
+		return JobResult{Success: false, Error: err}
 	}
 
 	if err := fixPermissions(zone.File); err != nil {
-		return JobResult{Success: false, Error: fmt.Errorf("ошибка прав: %v", err)}
+		err = fmt.Errorf("ошибка прав: %v", err)
+		return JobResult{Success: false, Error: err}
 	}
 
 	// Новая логика reload
@@ -1284,13 +1357,13 @@ func executeDeleteRecord(job *Job) JobResult {
 
 	if currentMode == "normal" {
 		if err := reloadBind(); err != nil {
-			log.Printf("WARNING: reload после создания зоны %s не выполнен: %v", job.ZoneName, err)
+			log.Printf("WARNING: reload после удаления записи %s не выполнен: %v", job.RecordName, err)
 		} else {
-			log.Printf("✓ Reload выполнен после создания зоны %s", job.ZoneName)
+			log.Printf("✓ Reload выполнен после удаления записи %s", job.RecordName)
 		}
 	} else {
 		PendingReload = true
-		log.Printf("📦 Batch режим: создана зона %s, reload будет выполнен позже", job.ZoneName)
+		log.Printf("📦 Batch режим: удалена запись %s, reload будет выполнен позже", job.RecordName)
 	}
 
 	// Обновляем состояние для синхронизации
@@ -1298,10 +1371,23 @@ func executeDeleteRecord(job *Job) JobResult {
 		SH.UpdateSyncState("zone_file", zone.File, job.ZoneName, zone.File, "api")
 	}
 
+	// Обновляем метрики записей
+	if Metrics != nil {
+		go Metrics.UpdateBusinessMetrics()
+	}
+
 	return JobResult{Success: true, Message: "Запись удалена"}
 }
 
 func executeReload() JobResult {
+	start := time.Now()
+	var err error
+	defer func() {
+		if Metrics != nil {
+			Metrics.RecordOperation("reload", time.Since(start), err)
+		}
+	}()
+
 	if err := reloadBind(); err != nil {
 		return JobResult{Success: false, Error: err}
 	}
@@ -2682,7 +2768,9 @@ func (r *ReplicaSync) CheckAndFixZones() error {
 		// Проверяем каждую A запись
 		needRetransfer := false
 		for _, record := range records {
-			if !r.CheckARecordResolve(zone.ZoneName, record.Name, record.Value) {
+			resolved := r.CheckARecordResolve(zone.ZoneName, record.Name, record.Value)
+			Metrics.RecordReplicaCheck(zone.ZoneName, resolved)
+			if !resolved {
 				needRetransfer = true
 				break
 			}
@@ -2694,6 +2782,8 @@ func (r *ReplicaSync) CheckAndFixZones() error {
 
 			cmd := exec.Command("rndc", "retransfer", zone.ZoneName)
 			output, err := cmd.CombinedOutput()
+			Metrics.RecordReplicaRetransfer(zone.ZoneName, err)
+
 			if err != nil {
 				log.Printf("Ошибка retransfer для зоны %s: %v, output: %s", zone.ZoneName, err, string(output))
 				continue

@@ -7,10 +7,10 @@ down:
 	docker-compose down -v
 
 setup:
-	docker-compose exec -T app /app/scripts/setup.sh
+	docker-compose exec -T app ./scripts/setup.sh
 
 test:
-	docker-compose exec -T app /app/scripts/run-test.sh
+	docker-compose exec -T app ./scripts/run-test.sh
 
 clean: down
 	rm -rf results/*
