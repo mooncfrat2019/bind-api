@@ -59,6 +59,9 @@ func main() {
 		app.InitJobQueue()
 		log.Println("✓ Очередь заданий инициализирована")
 
+		app.InitAsyncBuffer()
+		log.Println("✓ Асинхронный буфер записи инициализирован")
+
 		// Запуск мониторинга named.conf
 		app.StartNamedConfWatcher()
 	}

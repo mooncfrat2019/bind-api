@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"regexp"
 	"sync"
 	"time"
@@ -37,6 +38,20 @@ type JobResult struct {
 	Data    interface{}
 	Error   error
 }
+
+// --- Буфер ---
+
+type AsyncRecordBuffer struct {
+	mu        sync.RWMutex
+	pending   map[string][]string // zoneName -> []recordLine
+	flushCh   chan struct{}
+	batchSize int
+	interval  time.Duration
+	walFile   *os.File
+	walPath   string
+}
+
+var RecordBuffer *AsyncRecordBuffer
 
 // --- Структуры API ---
 

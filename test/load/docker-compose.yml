@@ -38,12 +38,12 @@ services:
       GIN_MODE: release
       SYNC_API_TOKEN: test_sync_token_12345
       MAX_QUEUE_SIZE: 1000
-      WORKER_TIMEOUT: 180
-      BATCH_SIZE: 50
-      BATCH_INTERVAL: 5
-      QUEUE_THRESHOLD_LOW: 0.1
-      QUEUE_THRESHOLD_HIGH: 0.3
-      RELOAD_INTERVAL: 10
+      WORKER_TIMEOUT: 60
+      BATCH_SIZE: 500
+      BATCH_INTERVAL: 1
+      QUEUE_THRESHOLD_LOW: 0.08
+      QUEUE_THRESHOLD_HIGH: 0.1
+      RELOAD_INTERVAL: 5
     ports:
       - "8080:8080"
       - "53:53"

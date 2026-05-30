@@ -3,9 +3,10 @@ package internal
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -16,29 +17,45 @@ import (
 // --- Handlers ---
 
 func HandleStatus(c *gin.Context) {
-	cmd := exec.Command("systemctl", "is-active", "named")
-	out, err := cmd.CombinedOutput()
-
-	status := "inactive"
-	if err == nil && strings.TrimSpace(string(out)) == "active" {
-		status = "active"
-	}
+	status := checkBindStatus()
 
 	response := gin.H{
 		"named_status": status,
 		"api_version":  "1.0.0",
 		"role":         AppRole,
+		"environment":  getEnvironment(),
 	}
 
 	if AppRole == "master" {
-		sqlDB, _ := Db.DB()
-		response["db_connected"] = sqlDB.Ping() == nil
+		if Db != nil {
+			sqlDB, _ := Db.DB()
+			if sqlDB != nil {
+				response["db_connected"] = sqlDB.Ping() == nil
+			} else {
+				response["db_connected"] = false
+			}
+		} else {
+			response["db_connected"] = false
+		}
 		response["queue_size"] = len(JQ)
+
+		// Добавляем информацию о режиме очереди
+		ModeMutex.RLock()
+		response["queue_mode"] = CurrentMode
+		ModeMutex.RUnlock()
+
+		response["pending_reload"] = PendingReload
+
+		// Информация о BIND процессе
+		if bindInfo := getBindProcessInfo(); bindInfo != nil {
+			response["bind_process"] = bindInfo
+		}
 	} else {
 		response["master_url"] = os.Getenv("MASTER_URL")
 		if RS != nil {
 			response["last_sync"] = RS.GetLastSyncTime()
 			response["sync_enabled"] = RS.Enabled
+			response["files_updated"] = RS.GetFilesUpdatedCount()
 		}
 	}
 
@@ -98,24 +115,164 @@ func HandleCreateZone(c *gin.Context) {
 		return
 	}
 
+	// Валидация имени зоны
+	if !validateZoneName(req.Name) {
+		sendResponse(c, http.StatusBadRequest, false,
+			"Недопустимое имя зоны",
+			"Имя зоны должно содержать только буквы, цифры, дефисы и точки, длина от 1 до 253 символов")
+		return
+	}
+
+	// Валидация обратной зоны если нужно
+	if strings.Contains(req.Name, "in-addr.arpa") || strings.Contains(req.Name, "ip6.arpa") {
+		if !validateReverseZoneName(req.Name) {
+			sendResponse(c, http.StatusBadRequest, false,
+				"Недопустимое имя обратной зоны",
+				"Неверный формат обратной зоны. Пример для IPv4: 1.168.192.in-addr.arpa")
+			return
+		}
+	}
+
+	// Валидация email
+	if req.Email != "" {
+		if !strings.Contains(req.Email, "@") || len(req.Email) > 255 {
+			sendResponse(c, http.StatusBadRequest, false,
+				"Недопустимый email адрес",
+				"Email должен содержать @ и быть не длиннее 255 символов")
+			return
+		}
+
+		// Проверка на недопустимые символы в email
+		emailParts := strings.Split(req.Email, "@")
+		if len(emailParts) != 2 {
+			sendResponse(c, http.StatusBadRequest, false,
+				"Недопустимый email адрес",
+				"Email должен содержать ровно один символ @")
+			return
+		}
+
+		localPart := emailParts[0]
+		domain := emailParts[1]
+
+		if len(localPart) == 0 || len(domain) == 0 {
+			sendResponse(c, http.StatusBadRequest, false,
+				"Недопустимый email адрес",
+				"Локальная часть и домен не могут быть пустыми")
+			return
+		}
+	}
+
+	// Валидация NS IP
+	if req.NsIP != "" {
+		ip := net.ParseIP(req.NsIP)
+		if ip == nil {
+			sendResponse(c, http.StatusBadRequest, false,
+				"Недопустимый IP адрес для NS записи",
+				"Укажите корректный IPv4 или IPv6 адрес")
+			return
+		}
+
+		// Для reverse зон проверяем соответствие IP
+		if strings.Contains(req.Name, "in-addr.arpa") {
+			if ip.To4() == nil {
+				sendResponse(c, http.StatusBadRequest, false,
+					"Несоответствие IP адреса",
+					"Для обратной зоны IPv4 необходимо указать IPv4 адрес")
+				return
+			}
+		}
+	}
+
+	// Проверка существования зоны
+	if zoneExistsInConfig(req.Name) {
+		sendResponse(c, http.StatusConflict, false,
+			"Зона уже существует",
+			fmt.Sprintf("Зона %s уже существует в конфигурации", req.Name))
+		return
+	}
+
+	// Проверка имени файла
+	zoneType := "forward"
+	if strings.Contains(req.Name, "in-addr.arpa") || strings.Contains(req.Name, "ip6.arpa") {
+		zoneType = "reverse"
+	}
+
+	var zoneFileName string
+	if zoneType == "reverse" {
+		zoneFileName = req.Name + ".rev"
+	} else {
+		zoneFileName = req.Name + ".zone"
+	}
+
+	zoneFilePath := filepath.Join(ZoneDir, zoneFileName)
+
+	// Проверка что файл не существует
+	if _, err := os.Stat(zoneFilePath); err == nil {
+		sendResponse(c, http.StatusConflict, false,
+			"Файл зоны уже существует",
+			fmt.Sprintf("Файл %s уже существует", zoneFilePath))
+		return
+	}
+
+	// Определяем конфиг файл для добавления зоны
+	targetConfigFile := req.ConfigFile
+	if targetConfigFile == "" {
+		zones, err := parseZoneConfig()
+		if err != nil || len(zones) == 0 {
+			targetConfigFile = NamedConf
+		} else {
+			targetConfigFile = zones[0].ConfigFile
+		}
+	}
+
+	// Проверяем что конфиг файл существует и доступен для записи
+	if _, err := os.Stat(targetConfigFile); os.IsNotExist(err) {
+		sendResponse(c, http.StatusBadRequest, false,
+			"Конфигурационный файл не найден",
+			fmt.Sprintf("Файл %s не существует", targetConfigFile))
+		return
+	}
+
+	// Создаем задание
 	job := &Job{
 		Type:       JobCreateZone,
 		ZoneName:   req.Name,
 		Email:      req.Email,
-		ConfigFile: req.ConfigFile,
+		ConfigFile: targetConfigFile,
 		NsIP:       req.NsIP,
 	}
 
+	// Отправляем в очередь
 	result, err := submitJob(job)
 	if err != nil {
-		sendResponse(c, http.StatusInternalServerError, false, "Ошибка очереди", err.Error())
+		sendResponse(c, http.StatusInternalServerError, false,
+			"Ошибка очереди заданий",
+			err.Error())
 		return
 	}
 
 	if result.Success {
-		sendResponse(c, http.StatusOK, true, result.Message, result.Data)
+		// Дополнительная информация в ответе
+		responseData := gin.H{
+			"zone":        req.Name,
+			"type":        zoneType,
+			"config_file": targetConfigFile,
+			"zone_file":   zoneFilePath,
+		}
+
+		if result.Data != nil {
+			if data, ok := result.Data.(gin.H); ok {
+				for k, v := range data {
+					responseData[k] = v
+				}
+			}
+		}
+
+		sendResponse(c, http.StatusOK, true, result.Message, responseData)
 	} else {
-		sendResponse(c, http.StatusInternalServerError, false, result.Message, result.Error.Error())
+		sendResponse(c, http.StatusInternalServerError, false,
+			result.Message,
+			result.Error.Error())
 	}
 }
 
