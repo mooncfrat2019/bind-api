@@ -342,11 +342,7 @@ func batchReloadWorker() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		ModeMutex.RLock()
-		mode := CurrentMode
-		ModeMutex.RUnlock()
-
-		if mode == "batch" && PendingReload {
+		if PendingReload {
 			if err := reloadBind(); err != nil {
 				log.Printf("❌ Периодический reload failed: %v", err)
 			} else {
