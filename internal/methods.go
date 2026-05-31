@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net"
@@ -1111,6 +1112,7 @@ func executeDeleteZone(job *Job) JobResult {
 
 	log.Printf("Удаление зоны %s: файл=%s, конфиг=%s", job.ZoneName, zone.File, zone.ConfigFile)
 
+	// Удаляем файл зоны
 	err = withFileLock(zone.File, func() error {
 		if _, err := os.Stat(zone.File); err == nil {
 			return os.Remove(zone.File)
@@ -1122,6 +1124,7 @@ func executeDeleteZone(job *Job) JobResult {
 		return JobResult{Success: false, Error: err}
 	}
 
+	// Удаляем зону из конфига
 	err = withFileLock(zone.ConfigFile, func() error {
 		return removeZoneFromConfig(zone.ConfigFile, job.ZoneName)
 	})
@@ -1130,6 +1133,7 @@ func executeDeleteZone(job *Job) JobResult {
 		return JobResult{Success: false, Error: err}
 	}
 
+	// Проверяем синтаксис конфига
 	cmd := exec.Command("named-checkconf")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1137,23 +1141,23 @@ func executeDeleteZone(job *Job) JobResult {
 		return JobResult{Success: false, Error: err}
 	}
 
-	// Новая логика reload
-	ModeMutex.RLock()
-	currentMode := CurrentMode
-	ModeMutex.RUnlock()
+	// Удаляем записи о зоне из sync_states (БД мастера)
+	if Db != nil {
+		result := Db.Where("file_type = ? AND zone_name = ?", "zone_file", job.ZoneName).
+			Delete(&SyncState{})
 
-	if currentMode == "normal" {
-		if err := reloadBind(); err != nil {
-			log.Printf("WARNING: reload после удаления зоны %s не выполнен: %v", job.ZoneName, err)
+		if result.Error != nil {
+			log.Printf("⚠️ Ошибка удаления зоны %s из sync_states: %v", job.ZoneName, result.Error)
 		} else {
-			log.Printf("✓ Reload выполнен после удаления зоны %s", job.ZoneName)
+			log.Printf("🗑️ Зона %s удалена из sync_states (удалено %d записей)",
+				job.ZoneName, result.RowsAffected)
 		}
-	} else {
-		PendingReload = true
-		log.Printf("📦 Batch режим: удалена зона %s, reload будет выполнен позже", job.ZoneName)
 	}
 
-	// Обновляем состояние для синхронизации
+	// Отмечаем что нужен reload
+	PendingReload = true
+
+	// Обновляем состояние для синхронизации (удаляем из конфигов)
 	if SH != nil {
 		SH.UpdateSyncState("named_conf", NamedConf, "", NamedConf, "api")
 		SH.UpdateSyncState("zone_conf", ZoneConfFile, "", ZoneConfFile, "api")
@@ -1660,8 +1664,15 @@ func (h *SyncHandler) GetSyncFile(c *gin.Context) {
 }
 
 func (h *SyncHandler) GetSyncZones(c *gin.Context) {
-	var states []SyncState
-	if err := h.db.Where("file_type = ?", "zone_file").Find(&states).Error; err != nil {
+	var zones []string
+
+	// Возвращаем только уникальные имена зон
+	err := h.db.Table("sync_states").
+		Where("file_type = ?", "zone_file").
+		Distinct("zone_name").
+		Pluck("zone_name", &zones).Error
+
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"message": "Ошибка получения зон",
@@ -1674,7 +1685,8 @@ func (h *SyncHandler) GetSyncZones(c *gin.Context) {
 		"success": true,
 		"message": "Список зон",
 		"data": gin.H{
-			"zones":     states,
+			"zones":     zones,
+			"count":     len(zones),
 			"timestamp": time.Now(),
 		},
 	})
@@ -2756,9 +2768,7 @@ func parseNslookupForIP(output string) string {
 }
 
 // GetMasterZonesList получает список всех зон с мастера
-func (r *ReplicaSync) GetMasterZonesList() ([]struct {
-	ZoneName string `json:"zone_name"`
-}, error) {
+func (r *ReplicaSync) GetMasterZonesList() ([]string, error) {
 	urlZ := fmt.Sprintf("%s/api/sync/zones", r.MasterURL)
 
 	req, err := http.NewRequest("GET", urlZ, nil)
@@ -2770,21 +2780,29 @@ func (r *ReplicaSync) GetMasterZonesList() ([]struct {
 
 	resp, err := r.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ошибка запроса к мастеру: %v", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("мастер вернул код %d: %s", resp.StatusCode, string(body))
+	}
 
 	var response struct {
 		Success bool `json:"success"`
 		Data    struct {
-			Zones []struct {
-				ZoneName string `json:"zone_name"`
-			} `json:"zones"`
+			Zones []string `json:"zones"`
+			Count int      `json:"count"`
 		} `json:"data"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ошибка парсинга ответа: %v", err)
+	}
+
+	if !response.Success {
+		return nil, fmt.Errorf("мастер вернул ошибку")
 	}
 
 	return response.Data.Zones, nil
@@ -2835,25 +2853,29 @@ func (r *ReplicaSync) CheckAndFixZones() error {
 		return nil
 	}
 
-	// Получаем список всех зон с мастера
+	// Получаем список всех зон с мастера (теперь это []string)
 	zones, err := r.GetMasterZonesList()
 	if err != nil {
 		return fmt.Errorf("ошибка получения списка зон: %v", err)
 	}
 
-	for _, zone := range zones {
+	log.Printf("Проверка %d зон на реплике", len(zones))
+
+	for _, zoneName := range zones {
 		// Получаем все A записи зоны с мастера
-		records, err := r.GetZoneARecordsFromMaster(zone.ZoneName)
+		records, err := r.GetZoneARecordsFromMaster(zoneName)
 		if err != nil {
-			log.Printf("Ошибка получения A записей для зоны %s: %v", zone.ZoneName, err)
+			log.Printf("Ошибка получения A записей для зоны %s: %v", zoneName, err)
 			continue
 		}
 
 		// Проверяем каждую A запись
 		needRetransfer := false
 		for _, record := range records {
-			resolved := r.CheckARecordResolve(zone.ZoneName, record.Name, record.Value)
-			Metrics.RecordReplicaCheck(zone.ZoneName, resolved)
+			resolved := r.CheckARecordResolve(zoneName, record.Name, record.Value)
+			if Metrics != nil {
+				Metrics.RecordReplicaCheck(zoneName, resolved)
+			}
 			if !resolved {
 				needRetransfer = true
 				break
@@ -2862,18 +2884,21 @@ func (r *ReplicaSync) CheckAndFixZones() error {
 
 		// Если хотя бы одна запись не резолвится - делаем retransfer
 		if needRetransfer {
-			log.Printf("Обнаружены проблемы с резолвингом зоны %s, выполняем retransfer", zone.ZoneName)
+			log.Printf("Обнаружены проблемы с резолвингом зоны %s, выполняем retransfer", zoneName)
 
-			cmd := exec.Command("rndc", "retransfer", zone.ZoneName)
+			cmd := exec.Command("rndc", "retransfer", zoneName)
 			output, err := cmd.CombinedOutput()
-			Metrics.RecordReplicaRetransfer(zone.ZoneName, err)
+
+			if Metrics != nil {
+				Metrics.RecordReplicaRetransfer(zoneName, err)
+			}
 
 			if err != nil {
-				log.Printf("Ошибка retransfer для зоны %s: %v, output: %s", zone.ZoneName, err, string(output))
+				log.Printf("Ошибка retransfer для зоны %s: %v, output: %s", zoneName, err, string(output))
 				continue
 			}
 
-			log.Printf("Retransfer для зоны %s выполнен успешно", zone.ZoneName)
+			log.Printf("Retransfer для зоны %s выполнен успешно", zoneName)
 
 			// После retransfer делаем паузу и проверяем снова
 			time.Sleep(2 * time.Second)
@@ -2881,16 +2906,16 @@ func (r *ReplicaSync) CheckAndFixZones() error {
 			// Повторная проверка после retransfer
 			allResolved := true
 			for _, record := range records {
-				if !r.CheckARecordResolve(zone.ZoneName, record.Name, record.Value) {
+				if !r.CheckARecordResolve(zoneName, record.Name, record.Value) {
 					allResolved = false
-					log.Printf("После retransfer запись %s.%s всё ещё не резолвится", record.Name, zone.ZoneName)
+					log.Printf("После retransfer запись %s.%s всё ещё не резолвится", record.Name, zoneName)
 				}
 			}
 
 			if allResolved {
-				log.Printf("✓ Зона %s полностью синхронизирована", zone.ZoneName)
+				log.Printf("✓ Зона %s полностью синхронизирована", zoneName)
 			} else {
-				log.Printf("⚠ После retransfer зона %s всё ещё имеет проблемы", zone.ZoneName)
+				log.Printf("⚠ После retransfer зона %s всё ещё имеет проблемы", zoneName)
 			}
 		}
 	}
@@ -2976,4 +3001,92 @@ func InitQueueConfig() {
 
 	log.Printf("Очередь инициализирована: MaxSize=%d, BatchSize=%d, BatchInterval=%v, ThresholdLow=%.0f%%, ThresholdHigh=%.0f%%",
 		MaxQueueSize, BatchSize, BatchInterval, QueueThresholdLow*100, QueueThresholdHigh*100)
+}
+
+// CleanupOrphanSyncStates удаляет из БД записи о зонах, которых нет в конфиге мастера
+func CleanupOrphanSyncStates() {
+	if AppRole != "master" || Db == nil {
+		return
+	}
+
+	log.Println("🧹 Мастер: проверка sync_states на наличие удаленных зон...")
+
+	// Получаем актуальные зоны из конфига мастера
+	currentZones, err := parseZoneConfig()
+	if err != nil {
+		log.Printf("❌ Ошибка получения текущих зон: %v", err)
+		return
+	}
+
+	// Создаем map существующих зон
+	existingZones := make(map[string]bool)
+	for _, zone := range currentZones {
+		existingZones[zone.Name] = true
+	}
+
+	// Получаем все зоны из БД мастера
+	var dbZones []string
+	err = Db.Table("sync_states").
+		Where("file_type = ?", "zone_file").
+		Where("zone_name IS NOT NULL AND zone_name != ''").
+		Distinct("zone_name").
+		Pluck("zone_name", &dbZones).Error
+
+	if err != nil {
+		log.Printf("❌ Ошибка получения зон из БД: %v", err)
+		return
+	}
+
+	// Удаляем записи о зонах, которых нет в конфиге мастера
+	deletedCount := 0
+	for _, zoneName := range dbZones {
+		if !existingZones[zoneName] {
+			result := Db.Where("file_type = ? AND zone_name = ?", "zone_file", zoneName).
+				Delete(&SyncState{})
+
+			if result.Error != nil {
+				log.Printf("⚠️ Ошибка удаления зоны %s из sync_states: %v", zoneName, result.Error)
+			} else if result.RowsAffected > 0 {
+				log.Printf("🗑️ Удалена зона %s из sync_states (удалено %d записей)",
+					zoneName, result.RowsAffected)
+				deletedCount++
+			}
+		}
+	}
+
+	if deletedCount > 0 {
+		log.Printf("✅ Очистка SyncStates завершена. Удалено зон: %d", deletedCount)
+	} else {
+		log.Printf("✅ Очистка SyncStates завершена. Удаленных зон не найдено")
+	}
+}
+
+// StartSyncStateCleaner запускает периодическую очистку sync_states на мастере
+func StartSyncStateCleaner() {
+	if AppRole != "master" {
+		return
+	}
+
+	interval := 5 * time.Minute // По умолчанию раз в 5 минут
+
+	if val := os.Getenv("SYNC_CLEANUP_INTERVAL"); val != "" {
+		if i, err := time.ParseDuration(val); err == nil {
+			interval = i
+		}
+	}
+
+	log.Printf("🧹 Запуск очистки SyncStates на мастере (интервал: %v)", interval)
+
+	go func() {
+		// Первая очистка через 1 минуту после старта
+		time.Sleep(1 * time.Minute)
+		CleanupOrphanSyncStates()
+
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			CleanupOrphanSyncStates()
+		}
+	}()
 }

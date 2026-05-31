@@ -62,6 +62,9 @@ func main() {
 		app.InitAsyncBuffer()
 		log.Println("✓ Асинхронный буфер записи инициализирован")
 
+		app.StartSyncStateCleaner()
+		log.Println("✓ Подпроцесс проверки и очистки зон запущен")
+
 		// Запуск мониторинга named.conf
 		app.StartNamedConfWatcher()
 	}
