@@ -47,7 +47,9 @@ func TestValidateRecordName(t *testing.T) {
 		{"with double dot", "www..example", false},
 		{"with slash", "www/example", false},
 		{"with semicolon", "www;example", false},
-		{"empty", "", true}, // пустое имя допустимо (@)
+		{"at sign", "@", true},  // @ - допустимое имя (сама зона)
+		{"asterisk", "*", true}, // * - wildcard запись
+		{"empty", "", false},    // пустое имя НЕ допустимо (нужно использовать @)
 	}
 
 	for _, tt := range tests {
