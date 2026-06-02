@@ -452,19 +452,21 @@ func HandleAuditLog(c *gin.Context) {
 }
 
 func HandleAuditStats(c *gin.Context) {
-	var total, completed, failed int64
+	var total, completed, failed, started int64
 
 	Db.Model(&AuditLog{}).Count(&total)
 	Db.Model(&AuditLog{}).Where("status = ?", "COMPLETED").Count(&completed)
 	Db.Model(&AuditLog{}).Where("status = ?", "FAILED").Count(&failed)
+	Db.Model(&AuditLog{}).Where("status = ?", "STARTED").Count(&started)
 
 	successRate := float64(0)
 	if total > 0 {
-		successRate = float64(completed) / float64(total) * 100
+		successRate = float64(completed) / (float64(total) - float64(started)) * 100
 	}
 
 	sendResponse(c, http.StatusOK, true, "Статистика аудита", gin.H{
 		"total":        total,
+		"started":      started,
 		"completed":    completed,
 		"failed":       failed,
 		"success_rate": successRate,
