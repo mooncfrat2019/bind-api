@@ -1604,6 +1604,7 @@ func (h *SyncHandler) GetSyncState(c *gin.Context) {
 	files := make([]SyncFileInfo, 0, len(states))
 	for _, state := range states {
 		files = append(files, SyncFileInfo{
+			ID:           state.ID,
 			FileType:     state.FileType,
 			FileName:     state.FileName,
 			ZoneName:     state.ZoneName,

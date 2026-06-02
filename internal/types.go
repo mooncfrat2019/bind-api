@@ -120,6 +120,7 @@ type ReplicaSyncStateResp struct {
 }
 
 type SyncFileInfo struct {
+	ID           uint      `json:"id"`
 	FileType     string    `json:"file_type"`
 	FileName     string    `json:"file_name"`
 	ZoneName     string    `json:"zone_name"`
