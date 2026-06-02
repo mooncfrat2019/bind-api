@@ -220,20 +220,196 @@ include "/etc/named.rfc1912.zones";
 include "/etc/named.root.key";
 ```
 
-### 3.3. Генерация rndc ключа
+## 3.3. Настройка rndc ключа
+
+### 3.3.1 Автоматическая генерация ключа
 
 ```bash
+# Генерация ключа rndc
 sudo rndc-confgen -a -c /etc/rndc.key
-sudo chown named:named /etc/rndc.key
+sudo chown root:named /etc/rndc.key
 sudo chmod 640 /etc/rndc.key
+
+# Проверка созданного ключа
+sudo cat /etc/rndc.key
 ```
 
-### 3.4. Проверка конфигурации BIND
+### 3.3.2 Ручная настройка rndc (если автоматическая не работает)
+
+Создайте файл `/etc/rndc.key`:
 
 ```bash
+sudo nano /etc/rndc.key
+```
+
+Добавьте содержимое:
+
+```bind
+key "rndc-key" {
+    algorithm hmac-sha256;
+    secret "pJ5sNk7xR9tF2gH4mK6pL8qW1eR3tY5uI7oA0sD2fG4hJ6=";
+};
+```
+
+**Важно:** Сгенерируйте свой уникальный секрет:
+
+```bash
+# Генерация случайного ключа
+echo "secret \"$(openssl rand -base64 32)\";"
+```
+
+### 3.3.3 Добавление controls в named.conf
+
+Отредактируйте `/etc/named.conf`:
+
+```bash
+sudo nano /etc/named.conf
+```
+
+Добавьте секцию `controls` (вне секции `options`):
+
+```bind
+controls {
+    inet 127.0.0.1 port 953 allow { 127.0.0.1; } keys { "rndc-key"; };
+};
+```
+
+### 3.3.4 Подключение ключа в named.conf
+
+Убедитесь, что в конце `named.conf` есть строка:
+
+```bind
+include "/etc/rndc.key";
+```
+
+### 3.3.5 Полный пример /etc/named.conf
+
+```bind
+options {
+    listen-on port 53 { any; };
+    listen-on-v6 port 53 { any; };
+    directory "/var/named";
+    allow-query { any; };
+    recursion no;
+    allow-transfer { 
+        10.50.13.4;      # IP реплики
+        localhost; 
+    };
+    also-notify { 
+        10.50.13.4;      # IP реплики
+    };
+    pid-file "/run/named/named.pid";
+};
+
+controls {
+    inet 127.0.0.1 port 953 allow { 127.0.0.1; } keys { "rndc-key"; };
+};
+
+zone "." IN {
+    type hint;
+    file "named.ca";
+};
+
+include "/etc/named.zones.conf";
+include "/etc/rndc.key";
+```
+
+### 3.3.6 Проверка работы rndc
+
+```bash
+# Проверка синтаксиса конфигурации
 sudo named-checkconf
+
+# Проверка статуса rndc
+sudo rndc status
+
+# Ожидаемый вывод:
+# version: 9.11.4-P2-RedHat-9.11.4-26.P2.el7_9.13
+# ...
+
+# Проверка конкретной зоны
+sudo rndc zonestatus example.com
+
+# Проверка возможности reload
+sudo rndc reload
+```
+
+### 3.3.7 Устранение ошибок rndc
+
+**Ошибка:** `rndc: neither /etc/rndc.conf nor /etc/rndc.key was found`
+
+**Решение:**
+```bash
+sudo rndc-confgen -a -c /etc/rndc.key
+sudo chown root:named /etc/rndc.key
+sudo chmod 640 /etc/rndc.key
 sudo systemctl restart named
+```
+
+**Ошибка:** `rndc: connection to remote host closed`
+
+**Решение:**
+1. Проверьте, что в `named.conf` есть секция `controls`
+2. Проверьте, что порт 953 слушается:
+   ```bash
+   sudo netstat -tlnp | grep 953
+   ```
+3. Проверьте SELinux (если включен):
+   ```bash
+   sudo setsebool -P named_tcp_bind_http_port_t on
+   ```
+
+**Ошибка:** `rndc: 'reload' failed: permission denied`
+
+**Решение:**
+```bash
+# Проверьте права на ключ
+sudo ls -la /etc/rndc.key
+# Должно быть: -rw-r----- 1 root named
+
+# Исправление прав
+sudo chown root:named /etc/rndc.key
+sudo chmod 640 /etc/rndc.key
+sudo systemctl restart named
+```
+
+### 3.3.8 Настройка rndc для удаленного управления (опционально)
+
+Если нужно управлять BIND с другого сервера:
+
+```bash
+# На мастере создайте ключ с именем хоста реплики
+sudo rndc-confgen -a -c /etc/rndc.key -t replication-key
+```
+
+В `named.conf` добавьте:
+
+```bind
+controls {
+    inet 0.0.0.0 port 953 allow { 
+        10.50.13.4;        # IP реплики
+        127.0.0.1; 
+    } keys { "rndc-key"; };
+};
+```
+
+---
+
+### 3.4 Проверка конфигурации BIND
+
+```bash
+# Проверка синтаксиса всех конфигов
+sudo named-checkconf
+
+# Перезапуск BIND
+sudo systemctl restart named
+
+# Проверка статуса
 sudo systemctl status named
+
+# Проверка rndc
+sudo rndc status
+sudo rndc reload
 ```
 
 ---
@@ -566,6 +742,25 @@ sudo journalctl -u bind-api -n 50
 
 # Проверка конфигурации
 cat /opt/bind-api/.env
+```
+
+### 9.5. Проблемы с rndc после установки
+
+```bash
+# Полная перегенерация rndc конфигурации
+sudo rm -f /etc/rndc.key /etc/rndc.conf
+sudo rndc-confgen -a -c /etc/rndc.key
+sudo chown root:named /etc/rndc.key
+sudo chmod 640 /etc/rndc.key
+
+# Проверка что ключ подключен в named.conf
+grep "include.*rndc.key" /etc/named.conf
+
+# Перезапуск BIND
+sudo systemctl restart named
+
+# Тест
+sudo rndc status
 ```
 
 ---
