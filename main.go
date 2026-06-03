@@ -51,6 +51,7 @@ func main() {
 		log.Fatalf("Ошибка инициализации БД: %v", err)
 	}
 
+	var validatedMasterURL string
 	// Инициализация обработчика синхронизации (только MASTER)
 	if app.AppRole == "master" {
 		app.SH = app.NewSH(app.Db)
@@ -78,11 +79,13 @@ func main() {
 			syncInterval, _ = strconv.Atoi(val)
 		}
 
-		if masterURL == "" {
-			log.Fatal("ERROR: MASTER_URL не указан для REPLICA")
+		var err error
+		validatedMasterURL, err = app.ValidateMasterURL(masterURL)
+		if err != nil {
+			log.Fatalf("ERROR: %v", err)
 		}
 
-		app.RS = app.NewReplicaSync(masterURL, apiToken, syncInterval, true)
+		app.RS = app.NewReplicaSync(validatedMasterURL, apiToken, syncInterval, true)
 		app.RS.Start()
 		log.Println("✓ Синхронизация REPLICA запущена")
 	}

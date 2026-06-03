@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -795,4 +796,61 @@ func StartBindIfNotRunning() error {
 	}
 
 	return WaitForBind(10 * time.Second)
+}
+
+func ValidateMasterURL(masterURL string) (string, error) {
+	allowInsecureSync := strings.EqualFold(strings.TrimSpace(os.Getenv("ALLOW_INSECURE_SYNC")), "true")
+	trimmed := strings.TrimSpace(masterURL)
+
+	if trimmed == "" {
+		if !allowInsecureSync {
+			return "", fmt.Errorf("MASTER_URL не указан: используйте https URL или установите ALLOW_INSECURE_SYNC=true и REPLICA_MASTER_IP")
+		}
+
+		masterIP := strings.TrimSpace(os.Getenv("REPLICA_MASTER_IP"))
+		if masterIP == "" {
+			return "", fmt.Errorf("MASTER_URL не указан и REPLICA_MASTER_IP пуст")
+		}
+
+		ip := net.ParseIP(masterIP)
+		if ip == nil {
+			return "", fmt.Errorf("REPLICA_MASTER_IP содержит некорректный IP адрес: %s", masterIP)
+		}
+
+		masterPort := strings.TrimSpace(os.Getenv("MASTER_API_PORT"))
+		if masterPort == "" {
+			masterPort = "8080"
+		}
+
+		portNum, err := strconv.Atoi(masterPort)
+		if err != nil || portNum < 1 || portNum > 65535 {
+			return "", fmt.Errorf("MASTER_API_PORT должен быть числом от 1 до 65535")
+		}
+
+		builtURL := fmt.Sprintf("http://%s:%d", masterIP, portNum)
+		log.Printf("WARNING: MASTER_URL не задан, используется небезопасный адрес синхронизации, собранный из REPLICA_MASTER_IP: %s", builtURL)
+		return builtURL, nil
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("некорректный MASTER_URL: %v", err)
+	}
+
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("некорректный MASTER_URL: требуется полный URL со схемой и хостом")
+	}
+
+	switch strings.ToLower(parsed.Scheme) {
+	case "https":
+	case "http":
+		if !allowInsecureSync {
+			return "", fmt.Errorf("MASTER_URL с http запрещён: используйте https или установите ALLOW_INSECURE_SYNC=true")
+		}
+		log.Printf("WARNING: используется небезопасный MASTER_URL по HTTP, так как ALLOW_INSECURE_SYNC=true")
+	default:
+		return "", fmt.Errorf("неподдерживаемая схема MASTER_URL: %s", parsed.Scheme)
+	}
+
+	return strings.TrimRight(parsed.String(), "/"), nil
 }

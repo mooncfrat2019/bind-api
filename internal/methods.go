@@ -2063,7 +2063,7 @@ func NewReplicaSync(masterURL, apiToken string, intervalSeconds int, enabled boo
 	}
 
 	return &ReplicaSync{
-		MasterURL:  masterURL,
+		MasterURL:  strings.TrimRight(masterURL, "/"),
 		APIToken:   apiToken,
 		Interval:   time.Duration(intervalSeconds) * time.Second,
 		Enabled:    enabled,
