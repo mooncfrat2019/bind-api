@@ -153,16 +153,33 @@ func InitDatabase() error {
 	var count int64
 	Db.Model(&APIKey{}).Count(&count)
 	if count == 0 {
-		permsJSON, _ := json.Marshal([]string{"*"})
-		defaultKey := &APIKey{
-			Name:        "default-admin",
-			Description: "⚠️ Дефолтный ключ — замените в продакшене!",
-			Permissions: string(permsJSON),
-		}
-		if err := Db.Create(defaultKey).Error; err != nil {
-			log.Printf("WARNING: Не удалось создать дефолтный API-ключ: %v", err)
+		bootstrapKey := strings.TrimSpace(os.Getenv("BIND_API_BOOTSTRAP_KEY"))
+		if bootstrapKey == "" {
+			log.Printf("WARNING: таблица api_keys пуста, bootstrap API-ключ не создан: переменная BIND_API_BOOTSTRAP_KEY не задана")
 		} else {
-			log.Printf("⚠️  СОЗДАН ДЕФОЛТНЫЙ API-КЛЮЧ: %s", defaultKey.Key)
+			if len(bootstrapKey) < 32 {
+				return fmt.Errorf("значение BIND_API_BOOTSTRAP_KEY слишком короткое: минимум 32 символа")
+			}
+
+			if len(bootstrapKey) > 120 {
+				return fmt.Errorf("значение BIND_API_BOOTSTRAP_KEY слишком длинное: максимум 120 символов")
+			}
+
+			expiresAt := time.Now().Add(7 * 24 * time.Hour)
+			permsJSON, _ := json.Marshal([]string{"*"})
+			defaultKey := &APIKey{
+				Key:         bootstrapKey,
+				Name:        "bootstrap-admin",
+				Description: "Временный bootstrap ключ из переменной окружения, срок действия 7 дней",
+				Permissions: string(permsJSON),
+				ExpiresAt:   &expiresAt,
+			}
+
+			if err := Db.Create(defaultKey).Error; err != nil {
+				log.Printf("WARNING: Не удалось создать bootstrap API-ключ из переменной окружения: %v", err)
+			} else {
+				log.Printf("✓ Bootstrap API-ключ создан из переменной окружения BIND_API_BOOTSTRAP_KEY со сроком действия 7 дней")
+			}
 		}
 	}
 
