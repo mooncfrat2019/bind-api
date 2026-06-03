@@ -6,12 +6,11 @@ on:
       - '*'
 
 jobs:
-  release:
-    name: Build and Release
+  build:
+    name: Build ${{ matrix.arch }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     strategy:
+      fail-fast: false
       matrix:
         arch: [amd64, arm64]
 
@@ -23,90 +22,149 @@ jobs:
 
       - name: Set up Go
         uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.1'
+          cache: true
+
+      - name: Show Go version
+        run: go version
 
       - name: Download dependencies
         run: go mod download
 
-      - name: Tidy dependencies (optional but recommended)
-        run: go mod tidy
-
       - name: Verify dependencies
         run: go mod verify
 
-      - name: Build for ${{ matrix.arch }}
+      - name: Build static binary for Linux ${{ matrix.arch }}
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
         run: |
-          GOOS=linux GOARCH=${{ matrix.arch }} go build -o bind-api-linux-${{ matrix.arch }} main.go
+          go build \
+            -trimpath \
+            -ldflags="-s -w -buildid=" \
+            -o bind-api \
+            ./main.go
+
+      - name: Check binary linkage
+        run: |
+          file bind-api
+          ldd bind-api || true
+
+      - name: Prepare release bundle for ${{ matrix.arch }}
+        run: |
+          BUNDLE_DIR="release/bind-api-linux-${{ matrix.arch }}"
+          mkdir -p "${BUNDLE_DIR}"
+
+          cp bind-api "${BUNDLE_DIR}/"
+          cp INSTALL.md "${BUNDLE_DIR}/"
+          cp MANUAL.md "${BUNDLE_DIR}/"
+          cp README.md "${BUNDLE_DIR}/"
 
       - name: Create tar.gz for ${{ matrix.arch }}
         run: |
-          tar -czf bind-api-linux-${{ matrix.arch }}.tar.gz bind-api-linux-${{ matrix.arch }}
+          tar -czf bind-api-linux-${{ matrix.arch }}.tar.gz -C release bind-api-linux-${{ matrix.arch }}
+
+      - name: Generate checksum for ${{ matrix.arch }}
+        run: |
+          sha256sum bind-api-linux-${{ matrix.arch }}.tar.gz > bind-api-linux-${{ matrix.arch }}.tar.gz.sha256
+
+      - name: Upload archive artifact for ${{ matrix.arch }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bind-api-linux-${{ matrix.arch }}-archive
+          path: bind-api-linux-${{ matrix.arch }}.tar.gz
+
+      - name: Upload checksum artifact for ${{ matrix.arch }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bind-api-linux-${{ matrix.arch }}-checksum
+          path: bind-api-linux-${{ matrix.arch }}.tar.gz.sha256
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.1'
+          cache: true
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          find dist -type f \( -name "*.tar.gz" -o -name "*.sha256" \) -exec cp {} release-assets/ \;
+          ls -la release-assets
 
       - name: Generate Release Notes
-        id: release_notes
         run: |
-          # Версия из go.mod
           GO_MOD_VERSION=$(grep "^go " go.mod | awk '{print $2}')
-          # Реальная версия компилятора
           GO_COMPILER_VERSION=$(go version | awk '{print $3}')
-          
-          # Получаем предыдущий тег
-          PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          CURRENT_TAG=${GITHUB_REF_NAME}
-          
-          # Формируем заголовок
+          CURRENT_TAG="${GITHUB_REF_NAME}"
+          PREVIOUS_TAG=$(git tag --sort=-creatordate | grep -Fxv "${CURRENT_TAG}" | head -n 1 || true)
+
           cat > release_notes.md << EOF
           ## Release ${CURRENT_TAG}
-          
+
           ### Downloads
-          - \`bind-api-linux-amd64.tar.gz\` - AMD64 architecture
-          - \`bind-api-linux-arm64.tar.gz\` - ARM64 architecture
-          
+          - \`bind-api-linux-amd64.tar.gz\` - Linux AMD64
+          - \`bind-api-linux-arm64.tar.gz\` - Linux ARM64
+
+          ### Included files
+          Each archive contains:
+          - \`bind-api\`
+          - \`INSTALL.md\`
+          - \`MANUAL.md\`
+          - \`README.md\`
+
+          ### Checksums
+          SHA-256 checksums are published as separate \`.sha256\` files for each archive.
+
+          ### Compatibility
+          - Built with \`CGO_ENABLED=0\`
+          - Static Go binary
+          - Does not require target system GLIBC 2.33+
+
           ### Changelog
-          
+
           EOF
-          
-          if [ -z "$PREVIOUS_TAG" ]; then
-            # Первый релиз - показываем все коммиты
-            echo "### All commits:" >> release_notes.md
-            git log --pretty=format:"- **%s** (%h) - %an, %ar" --reverse >> release_notes.md
+
+          if [ -n "${PREVIOUS_TAG}" ]; then
+            git log "${PREVIOUS_TAG}..HEAD" --pretty=format:"- %s (%h)" --reverse >> release_notes.md
           else
-            # Коммиты между релизами
-            echo "### Changes since ${PREVIOUS_TAG}:" >> release_notes.md
-            echo "" >> release_notes.md
-          
-            # Группируем по типу изменений (опционально)
-            echo "#### 🚀 New Features" >> release_notes.md
-            git log ${PREVIOUS_TAG}..HEAD --grep="feat" --pretty=format:"- %s (%h)" --reverse >> release_notes.md || echo "None" >> release_notes.md
-          
-            echo "" >> release_notes.md
-            echo "#### 🐛 Bug Fixes" >> release_notes.md
-            git log ${PREVIOUS_TAG}..HEAD --grep="fix" --pretty=format:"- %s (%h)" --reverse >> release_notes.md || echo "None" >> release_notes.md
-          
-            echo "" >> release_notes.md
-            echo "#### 📚 Documentation" >> release_notes.md
-            git log ${PREVIOUS_TAG}..HEAD --grep="docs" --pretty=format:"- %s (%h)" --reverse >> release_notes.md || echo "None" >> release_notes.md
-          
-            echo "" >> release_notes.md
-            echo "#### 🔧 Other Changes" >> release_notes.md
-            git log ${PREVIOUS_TAG}..HEAD --invert-grep --grep="feat" --grep="fix" --grep="docs" --pretty=format:"- %s (%h)" --reverse >> release_notes.md || echo "None" >> release_notes.md
+            git log --pretty=format:"- %s (%h)" --reverse >> release_notes.md
           fi
-          
-          # Добавляем информацию о сборке
+
           cat >> release_notes.md << EOF
-          
+
           ---
-          ### 🔨 Build Details
-          - Go version: ${GO_MOD_VERSION}
+          ### Build Details
+          - Go version from go.mod: ${GO_MOD_VERSION}
           - Go compiler version: ${GO_COMPILER_VERSION}
           - Build date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
           - Commit: ${GITHUB_SHA::7}
-          
           EOF
 
-      - name: Upload to Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: bind-api-linux-*.tar.gz
+          files: release-assets/*
           body_path: release_notes.md
           draft: false
           prerelease: false
