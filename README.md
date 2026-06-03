@@ -116,13 +116,13 @@ bind-api/
 
 **Уровни доступа:**
 
-| Роль | Права | Эндпоинты |
-|------|-------|-----------|
-| `zone:read` | Чтение | `/read/*` |
-| `zone:write` | Запись | `/write/*` |
-| `admin` | Полный доступ | `/keys/*` + все остальные |
-| `sync:read` | Синхронизация | `/sync/*` (для реплик) |
-
+| Роль / механизм | Назначение | Эндпоинты |
+|-----------------|------------|-----------|
+| `zone:read` | Чтение зон, аудита и конфигурации | `/read/*` |
+| `zone:write` | Изменение зон и записей | `/write/*` |
+| `admin` | Управление API-ключами | `/keys/*` |
+| `*` | Полный доступ | Все API-эндпоинты |
+| `X-Sync-Token` | Синхронизация master-replica | `/sync/*` |
 ---
 
 ## 3. Быстрый старт
@@ -225,7 +225,7 @@ BIND_ZONE_DIR=/var/named/
 BIND_NAMED_CONF=/etc/named.conf
 BIND_ZONE_CONF=/etc/named.zones.conf
 API_PORT=:8080
-MASTER_URL=http://10.10.10.3:8080
+MASTER_URL=https://master.example.internal
 MASTER_API_TOKEN=your_secure_sync_token_12345
 SYNC_INTERVAL=30
 REPLICA_MASTER_IP=10.10.10.3
@@ -233,7 +233,16 @@ REPLICA_ZONE_TYPE=slave
 REPLICA_ZONE_SUBDIR=slaves
 REPLICA_REMOVE_ALLOW_TRANSFER=true
 REPLICA_DISABLE_IPV6=true
-REPLICA_EXTERNAL_IP=10.69.13.10   # IP реплики для самопроверки
+REPLICA_EXTERNAL_IP=10.10.10.4   # IP реплики для самопроверки
+
+# Только для dev/test или доверенной внутренней сети
+ALLOW_INSECURE_SYNC=true
+MASTER_URL=http://10.10.10.3:8080
+
+# Или fallback, если MASTER_URL не задан
+ALLOW_INSECURE_SYNC=true
+REPLICA_MASTER_IP=10.10.10.3
+MASTER_API_PORT=8080
 
 # Запуск
 sudo ./bind-api
@@ -269,8 +278,10 @@ sudo ./bind-api
 | `REPLICA_ZONE_SUBDIR` | `slaves` | Подкаталог для файлов зон |
 | `REPLICA_REMOVE_ALLOW_TRANSFER` | `false` | Удалять `allow-transfer` на реплике |
 | `REPLICA_DISABLE_IPV6` | `false` | Отключать IPv6 на реплике |
-| **`REPLICA_EXTERNAL_IP` (v0.4.0)** | `127.0.0.1` | Внешний IP реплики для проверки резолвинга |
-
+| `REPLICA_EXTERNAL_IP` | `127.0.0.1` | Внешний IP реплики для проверки резолвинга |
+| `ALLOW_INSECURE_SYNC` | `false` | Разрешить sync API по HTTP (только для dev/test или доверенной сети) |
+| `MASTER_API_PORT` | `8080` | Порт API мастера для fallback-сборки URL из `REPLICA_MASTER_IP` |
+| `BIND_API_BOOTSTRAP_KEY` | — | Bootstrap API-ключ для первого запуска MASTER, создаётся с правами `*` и TTL 7 дней |
 ---
 
 ## 5. API Reference
@@ -457,9 +468,70 @@ CREATE TABLE sync_states (
 
 ---
 
-## 8. Master-Replica синхронизация
+## 8. Работа с репликами
 
-### 8.1. Трансформация конфигурации
+### 8.1. Настройка подключения реплики к мастеру
+
+Для синхронизации реплика использует `MASTER_URL` как основной адрес API мастера.
+
+**Рекомендуемый вариант для production:**
+- указывать `MASTER_URL` в формате `https://...`;
+- завершать TLS на nginx / HAProxy / ingress / service mesh;
+- не публиковать sync API напрямую наружу;
+- ограничивать доступ к `/api/sync/*` по сети.
+
+Пример:
+
+```shell
+MASTER_URL=https://master.example.internal MASTER_API_TOKEN=secret SYNC_INTERVAL=30
+```
+
+#### Небезопасный режим для dev/test
+
+Для тестовой или изолированной внутренней среды можно разрешить HTTP:
+
+```shell
+ALLOW_INSECURE_SYNC=true MASTER_URL=http://10.10.10.3:8080
+```
+
+Если `MASTER_URL` не задан, но включён `ALLOW_INSECURE_SYNC=true`, приложение попытается автоматически собрать адрес sync API из:
+
+- `REPLICA_MASTER_IP`
+- `MASTER_API_PORT`
+
+То есть будет использован адрес вида:
+
+```shell
+http://<REPLICA_MASTER_IP>:<MASTER_API_PORT>
+```
+
+Пример:
+```shell
+ALLOW_INSECURE_SYNC=true REPLICA_MASTER_IP=10.10.10.3 MASTER_API_PORT=8080
+```
+
+В этом режиме:
+- `REPLICA_MASTER_IP` должен быть корректным IP-адресом;
+- `MASTER_API_PORT` должен быть числом от `1` до `65535`;
+- этот режим рекомендуется использовать только в dev/test или в доверенной закрытой сети.
+
+### 8.2. Назначение переменных реплики
+
+| Переменная | Назначение |
+|-----------|------------|
+| `MASTER_URL` | Основной URL API мастера для sync-запросов |
+| `MASTER_API_TOKEN` | Токен доступа к sync API |
+| `SYNC_INTERVAL` | Интервал синхронизации в секундах |
+| `ALLOW_INSECURE_SYNC` | Разрешает использование HTTP для sync API |
+| `REPLICA_MASTER_IP` | IP мастера для BIND `masters {}` и fallback-адреса sync API |
+| `MASTER_API_PORT` | Порт API мастера для fallback-сборки `MASTER_URL` |
+| `REPLICA_ZONE_TYPE` | Тип зон на реплике |
+| `REPLICA_ZONE_SUBDIR` | Подкаталог для slave-файлов |
+| `REPLICA_REMOVE_ALLOW_TRANSFER` | Удалять `allow-transfer` при трансформации |
+| `REPLICA_DISABLE_IPV6` | Отключать `listen-on-v6` на реплике |
+| `REPLICA_EXTERNAL_IP` | IP реплики для проверки резолвинга |
+
+### 8.3. Трансформация конфигурации
 
 | Директива | На мастере | На реплике |
 |-----------|------------|------------|
