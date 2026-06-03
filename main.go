@@ -147,6 +147,8 @@ func main() {
 				zoneWrite.POST("/zone/:name/record", app.HandleAddRecord)
 				zoneWrite.DELETE("/zone/:name/record/:record/:type", app.HandleDeleteRecord)
 				zoneWrite.POST("/reload", app.HandleReload)
+				// позволяет выполнить rollback с правами write
+				zoneWrite.POST("/version/:id/rollback", app.SH.RollbackVersion)
 			}
 
 			// Управление ключами (требуется admin)

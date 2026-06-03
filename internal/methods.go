@@ -1881,28 +1881,46 @@ func (h *SyncHandler) RollbackVersion(c *gin.Context) {
 
 	log.Printf("Откат версии %d для %s (type: %s)", state.Version, state.FileName, state.FileType)
 
+	switch state.FileType {
+	case "zone_file", "named_conf", "zone_conf":
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "Неподдерживаемый тип файла для rollback",
+		})
+		return
+	}
+
+	if state.FileType == "zone_file" && !validateZoneName(state.ZoneName) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "Некорректное имя зоны для rollback",
+		})
+		return
+	}
+
 	// Блокируем файл
 	err := withFileLock(state.FileName, func() error {
 		// Записываем контент во временный файл
 		tmpPath := state.FileName + ".rollback.tmp"
-		if err := ioutil.WriteFile(tmpPath, []byte(state.Content), 0640); err != nil {
+		if err := os.WriteFile(tmpPath, []byte(state.Content), 0640); err != nil {
 			return fmt.Errorf("ошибка записи временного файла: %v", err)
 		}
 
 		// Проверяем синтаксис если не force
 		if !force {
-			var checkCmd string
+			var cmd *exec.Cmd
 
-			// ВАЖНО: Для zone_file используем named-checkzone, для конфигов - named-checkconf
-			if state.FileType == "zone_file" {
-				// named-checkzone требует имя зоны и путь к файлу
-				checkCmd = fmt.Sprintf("named-checkzone %s %s", state.ZoneName, tmpPath)
-			} else {
-				// Для named_conf и zone_conf
-				checkCmd = fmt.Sprintf("named-checkconf %s", tmpPath)
+			switch state.FileType {
+			case "zone_file":
+				cmd = exec.Command("named-checkzone", state.ZoneName, tmpPath)
+			case "named_conf", "zone_conf":
+				cmd = exec.Command("named-checkconf", tmpPath)
+			default:
+				os.Remove(tmpPath)
+				return fmt.Errorf("неподдерживаемый тип файла для rollback: %s", state.FileType)
 			}
 
-			cmd := exec.Command("bash", "-c", checkCmd)
 			output, err := cmd.CombinedOutput()
 			if err != nil {
 				os.Remove(tmpPath)
