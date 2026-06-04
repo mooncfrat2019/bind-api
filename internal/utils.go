@@ -266,14 +266,17 @@ func validateRecordValue(recordType, value string) error {
 
 // validateTTL проверяет корректность TTL значения
 func validateTTL(ttl int) error {
-	if ttl < 0 {
-		return fmt.Errorf("TTL не может быть отрицательным: %d", ttl)
-	}
+	const (
+		MinTTL = 30
+		MaxTTL = 604800
+	)
 
-	if ttl > 2147483647 { // Максимальное значение для 32-битного signed int
-		return fmt.Errorf("TTL слишком большой: %d (максимум 2147483647)", ttl)
+	if ttl < MinTTL {
+		return fmt.Errorf("TTL слишком мал: %d (минимум %d)", ttl, MinTTL)
 	}
-
+	if ttl > MaxTTL {
+		return fmt.Errorf("TTL слишком велик: %d (максимум %d)", ttl, MaxTTL)
+	}
 	return nil
 }
 
