@@ -74,10 +74,12 @@ func fixPermissions(filename string) error {
 // validateZoneName проверяет корректность имени зоны согласно RFC 1035
 func validateZoneName(name string) bool {
 	// Базовые проверки на опасные символы
-	if strings.Contains(name, "..") || strings.Contains(name, "/") || strings.Contains(name, ";") {
+	if strings.Contains(name, "..") || strings.Contains(name, "/") ||
+		strings.Contains(name, "\\") || strings.Contains(name, ";") ||
+		strings.Contains(name, "|") || strings.Contains(name, "&") ||
+		strings.Contains(name, "$") || strings.Contains(name, "`") {
 		return false
 	}
-
 	// Проверка длины
 	if len(name) < 1 || len(name) > 253 {
 		return false
