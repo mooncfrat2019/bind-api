@@ -2,7 +2,6 @@ package internal
 
 import (
 	"bufio"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -558,14 +557,6 @@ func calculateChecksum(filePath string) (string, error) {
 	}
 	hash := sha256.Sum256(content)
 	return hex.EncodeToString(hash[:]), nil
-}
-
-func generateSecureKey() string {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		panic(err)
-	}
-	return hex.EncodeToString(b)
 }
 
 // isIPv4 проверяет, является ли строка корректным IPv4-адресом

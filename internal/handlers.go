@@ -3,6 +3,7 @@ package internal
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -490,34 +491,47 @@ func HandleReplicaLastUpdate(c *gin.Context) {
 	})
 }
 
+// HandleCreateAPIKey создаёт новый API-ключ
 func HandleCreateAPIKey(c *gin.Context) {
 	var req CreateAPIKeyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"success": false,
-			"message": "Ошибка валидации",
-			"error":   err.Error(),
-		})
+		sendResponse(c, http.StatusBadRequest, false, "Ошибка валидации: "+err.Error(), nil)
+		return
+	}
+
+	// Валидация прав
+	if len(req.Permissions) == 0 {
+		sendResponse(c, http.StatusBadRequest, false, "Требуется хотя бы одно право", nil)
+		return
+	}
+
+	// ГЕНЕРАЦИЯ КЛЮЧА
+	plainKey := generateSecureKey()
+
+	// ХЕШИРОВАНИЕ
+	keyHash, err := hashAPIKey(plainKey)
+	if err != nil {
+		sendResponse(c, http.StatusInternalServerError, false, "Ошибка хеширования ключа", nil)
+		return
+	}
+
+	// Создаём ключ в БД
+	permsJSON, err := json.Marshal(req.Permissions)
+	if err != nil {
+		sendResponse(c, http.StatusInternalServerError, false, "Ошибка сериализации прав", nil)
 		return
 	}
 
 	var expiresAt *time.Time
 	if req.ExpiresIn > 0 {
-		t := time.Now().AddDate(0, 0, req.ExpiresIn)
-		expiresAt = &t
+		exp := time.Now().Add(time.Duration(req.ExpiresIn) * time.Hour)
+		expiresAt = &exp
 	}
 
-	permsJSON, err := json.Marshal(req.Permissions)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"message": "Ошибка сериализации прав",
-			"error":   err.Error(),
-		})
-		return
-	}
-
-	key := APIKey{
+	apiKey := &APIKey{
+		Key:         "-",
+		KeyHash:     keyHash,
+		KeyPrefix:   generateKeyPrefix(plainKey),
 		Name:        req.Name,
 		Description: req.Description,
 		Permissions: string(permsJSON),
@@ -525,27 +539,24 @@ func HandleCreateAPIKey(c *gin.Context) {
 		ExpiresAt:   expiresAt,
 	}
 
-	if err := Db.Create(&key).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"message": "Ошибка создания ключа",
-			"error":   err.Error(),
-		})
+	if err := Db.Create(apiKey).Error; err != nil {
+		sendResponse(c, http.StatusInternalServerError, false, "Ошибка сохранения ключа: "+err.Error(), nil)
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
-		"success": true,
-		"message": "API-ключ создан",
-		"data": CreateAPIKeyResponse{
-			Key:         key.Key,
-			Name:        key.Name,
-			Permissions: req.Permissions,
-			IPAddress:   key.IPAddress,
-			ExpiresAt:   key.ExpiresAt,
-			CreatedAt:   key.CreatedAt,
-		},
-	})
+	// ВОЗВРАЩАЕМ КЛЮЧ ТОЛЬКО ОДИН РАЗ
+	response := CreateAPIKeyResponse{
+		Key:         plainKey,
+		Name:        apiKey.Name,
+		Permissions: req.Permissions,
+		IPAddress:   apiKey.IPAddress,
+		ExpiresAt:   apiKey.ExpiresAt,
+		CreatedAt:   apiKey.CreatedAt,
+	}
+
+	log.Printf("Создан API-ключ: ID=%d, Name=%s", apiKey.ID, apiKey.Name)
+
+	sendResponse(c, http.StatusCreated, true, "API-ключ создан", response)
 }
 
 func HandleListAPIKeys(c *gin.Context) {

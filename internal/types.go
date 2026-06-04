@@ -242,6 +242,8 @@ type APIKey struct {
 	LastUsedAt *time.Time `json:"last_used_at"`
 	CreatedAt  time.Time  `json:"created_at"`
 	UpdatedAt  time.Time  `json:"updated_at"`
+	KeyHash    string     `gorm:"type:varchar(255);not null;uniqueIndex" json:"-"` // Хеш вместо ключа
+	KeyPrefix  string     `gorm:"type:varchar(20);not null;index" json:"-"`        // Префикс для поиска
 }
 
 func (APIKey) TableName() string {
@@ -269,9 +271,12 @@ func (k *APIKey) IsExpired() bool {
 	return k.ExpiresAt != nil && time.Now().After(*k.ExpiresAt)
 }
 
+// BeforeCreate генерирует хеш и префикс при создании ключа
+// Ключ должен быть установлен перед вызовом Create
 func (k *APIKey) BeforeCreate(tx *gorm.DB) error {
-	if k.Key == "" {
-		k.Key = generateSecureKey()
+	if k.KeyHash == "" && k.KeyPrefix == "" {
+		// Ключ должен быть сгенерирован и захеширован до создания
+		return fmt.Errorf("KeyHash и KeyPrefix должны быть установлены перед созданием")
 	}
 	return nil
 }

@@ -30,7 +30,13 @@ func setupTest(t *testing.T) (*gin.Engine, *gorm.DB, string) {
 	SetGlobalDB(db)
 
 	permsJSON, _ := json.Marshal([]string{"*"})
+	plainKey := "test-api-key-12345"
+	keyHash, err := hashAPIKey(plainKey)
+	require.NoError(t, err)
+
 	testKey := &APIKey{
+		KeyHash:     keyHash,
+		KeyPrefix:   generateKeyPrefix(plainKey),
 		Name:        "test-key",
 		Description: "Test API Key",
 		Permissions: string(permsJSON),
@@ -44,7 +50,7 @@ func setupTest(t *testing.T) (*gin.Engine, *gorm.DB, string) {
 		RestoreGlobalDB(oldDB)
 	})
 
-	return router, db, testKey.Key
+	return router, db, plainKey
 }
 
 // Тесты без middleware для проверки валидации

@@ -147,6 +147,10 @@ func InitDatabase() error {
 		return fmt.Errorf("ошибка миграции: %v", err)
 	}
 
+	if err := MigrateExistingKeys(); err != nil {
+		log.Printf("⚠️ Ошибка миграции ключей: %v", err)
+	}
+
 	if err != nil {
 		return fmt.Errorf("не удалось подключиться к PostgreSQL после %d попыток: %v", maxRetries, err)
 	}
@@ -167,8 +171,16 @@ func InitDatabase() error {
 
 			expiresAt := time.Now().Add(7 * 24 * time.Hour)
 			permsJSON, _ := json.Marshal([]string{"*"})
+
+			keyHash, errHash := hashAPIKey(bootstrapKey)
+			if errHash != nil {
+				return fmt.Errorf("ошибка хеширования bootstrap ключа: %v", err)
+			}
+
 			defaultKey := &APIKey{
-				Key:         bootstrapKey,
+				Key:         "-",
+				KeyHash:     keyHash,
+				KeyPrefix:   generateKeyPrefix(bootstrapKey),
 				Name:        "bootstrap-admin",
 				Description: "Временный bootstrap ключ из переменной окружения, срок действия 7 дней",
 				Permissions: string(permsJSON),
@@ -2549,6 +2561,9 @@ func (r *ReplicaSync) GetFilesUpdatedCount() int {
 }
 
 // APIKeyAuth проверяет API-ключ и права доступа
+// ... existing code ...
+
+// APIKeyAuth проверяет API-ключ и права доступа
 func APIKeyAuth(requiredPerm string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		apiKey := c.GetHeader("X-API-Key")
@@ -2571,8 +2586,22 @@ func APIKeyAuth(requiredPerm string) gin.HandlerFunc {
 			return
 		}
 
+		// ИСПОЛЬЗУЕМ ПРЕФИКС ДЛЯ БЫСТРОГО ПОИСКА
+		keyPrefix := generateKeyPrefix(apiKey)
+
 		var key APIKey
-		if err := Db.Where("key = ?", apiKey).First(&key).Error; err != nil {
+		// Ищем по префиксу, затем проверяем хеш
+		if err := Db.Where("key_prefix = ?", keyPrefix).First(&key).Error; err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"success": false,
+				"message": "Неверный API-ключ",
+			})
+			c.Abort()
+			return
+		}
+
+		// ПРОВЕРЯЕМ ХЕШ ВМЕСТО ПРЯМОГО СРАВНЕНИЯ
+		if !verifyAPIKey(apiKey, key.KeyHash) {
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"success": false,
 				"message": "Неверный API-ключ",
