@@ -34,6 +34,63 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
+// createHashedKey создаёт API-ключ с правильным хешированием
+func createHashedKey(t *testing.T, db *gorm.DB, name string, permissions []string, expiresAt *time.Time) (*APIKey, string) {
+	// Генерируем plaintext ключ
+	plainKey := generateSecureKey()
+
+	// Хешируем с cost 12
+	keyHash, err := hashAPIKey(plainKey)
+	require.NoError(t, err)
+
+	// Создаём префикс
+	keyPrefix := generateKeyPrefix(plainKey)
+
+	// Сериализуем права
+	permsJSON, err := json.Marshal(permissions)
+	require.NoError(t, err)
+
+	// Создаём ключ в БД
+	apiKey := &APIKey{
+		Key:         keyHash,
+		KeyHash:     keyHash,
+		KeyPrefix:   keyPrefix,
+		Name:        name,
+		Permissions: string(permsJSON),
+		ExpiresAt:   expiresAt,
+	}
+
+	err = db.Create(apiKey).Error
+	require.NoError(t, err)
+
+	// Возвращаем структуру и plaintext ключ для тестов
+	return apiKey, plainKey
+}
+
+// createFixedHashedKey создаёт ключ с фиксированным plaintext (для тестов где нужен конкретный ключ)
+func createFixedHashedKey(t *testing.T, db *gorm.DB, name string, plainKey string, permissions []string) (*APIKey, string) {
+	keyHash, err := hashAPIKey(plainKey)
+	require.NoError(t, err)
+
+	keyPrefix := generateKeyPrefix(plainKey)
+
+	permsJSON, err := json.Marshal(permissions)
+	require.NoError(t, err)
+
+	apiKey := &APIKey{
+		Key:         keyHash,
+		KeyHash:     keyHash,
+		KeyPrefix:   keyPrefix,
+		Name:        name,
+		Permissions: string(permsJSON),
+	}
+
+	err = db.Create(apiKey).Error
+	require.NoError(t, err)
+
+	return apiKey, plainKey
+}
+
 func setupAPIKeyTest(t *testing.T) (*gin.Engine, string, *gorm.DB) {
 	gin.SetMode(gin.TestMode)
 
@@ -46,15 +103,8 @@ func setupAPIKeyTest(t *testing.T) (*gin.Engine, string, *gorm.DB) {
 	oldDB := Db
 	Db = db
 
-	// Создаём админский ключ
-	permsJSON, _ := json.Marshal([]string{"admin", "zone:read", "zone:write"})
-	adminKey := &APIKey{
-		Name:        "admin-key",
-		Description: "Admin test key",
-		Permissions: string(permsJSON),
-	}
-	err = db.Create(adminKey).Error
-	require.NoError(t, err)
+	// Создаём админский ключ с хешированием
+	_, adminKey := createHashedKey(t, db, "admin-key", []string{"admin", "zone:read", "zone:write"}, nil)
 
 	router := gin.New()
 
@@ -62,29 +112,17 @@ func setupAPIKeyTest(t *testing.T) (*gin.Engine, string, *gorm.DB) {
 		Db = oldDB
 	})
 
-	return router, adminKey.Key, db
+	return router, adminKey, db
 }
 
 func TestAPIKeyAuth(t *testing.T) {
 	router, _, db := setupAPIKeyTest(t)
 
-	// Создаём тестовый ключ
-	permsJSON, _ := json.Marshal([]string{"zone:read"})
-	validKey := &APIKey{
-		Name:        "test-key",
-		Permissions: string(permsJSON),
-	}
-	err := db.Create(validKey).Error
-	require.NoError(t, err)
+	// Создаём тестовый ключ с хешированием
+	validKey, validPlainKey := createHashedKey(t, db, "test-key", []string{"zone:read"}, nil)
 
 	expiredTime := time.Now().Add(-24 * time.Hour)
-	expiredKey := &APIKey{
-		Name:        "expired-key",
-		Permissions: string(permsJSON),
-		ExpiresAt:   &expiredTime,
-	}
-	err = db.Create(expiredKey).Error
-	require.NoError(t, err)
+	expiredKey, expiredPlainKey := createHashedKey(t, db, "expired-key", []string{"zone:read"}, &expiredTime)
 
 	router.GET("/test", APIKeyAuth("zone:read"), func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"success": true})
@@ -95,10 +133,10 @@ func TestAPIKeyAuth(t *testing.T) {
 		apiKey         string
 		expectedStatus int
 	}{
-		{"valid key", validKey.Key, http.StatusOK},
+		{"valid key", validPlainKey, http.StatusOK},
 		{"no key", "", http.StatusUnauthorized},
 		{"invalid key", "invalid-key", http.StatusUnauthorized},
-		{"expired key", expiredKey.Key, http.StatusUnauthorized},
+		{"expired key", expiredPlainKey, http.StatusUnauthorized},
 	}
 
 	for _, tt := range tests {
@@ -113,6 +151,10 @@ func TestAPIKeyAuth(t *testing.T) {
 			assert.Equal(t, tt.expectedStatus, w.Code)
 		})
 	}
+
+	// Подавляем unused warning
+	_ = validKey
+	_ = expiredKey
 }
 
 func TestAPIKeyCreateAndList(t *testing.T) {
@@ -156,13 +198,7 @@ func TestAPIKeyCreateAndList(t *testing.T) {
 func TestAPIKeyRevoke(t *testing.T) {
 	router, adminKey, db := setupAPIKeyTest(t)
 
-	userPerms, _ := json.Marshal([]string{"zone:read"})
-	userKey := &APIKey{
-		Name:        "user-key",
-		Permissions: string(userPerms),
-	}
-	err := db.Create(userKey).Error
-	require.NoError(t, err)
+	userKey, _ := createHashedKey(t, db, "user-key", []string{"zone:read"}, nil)
 
 	router.DELETE("/api/keys/:id", APIKeyAuth("admin"), HandleRevokeAPIKey)
 
@@ -181,19 +217,13 @@ func TestAPIKeyRevoke(t *testing.T) {
 func TestAPIKeyRevokeOwnKey(t *testing.T) {
 	router, _, db := setupAPIKeyTest(t)
 
-	permsJSON, _ := json.Marshal([]string{"admin"})
-	key := &APIKey{
-		Name:        "test-key",
-		Permissions: string(permsJSON),
-	}
-	err := db.Create(key).Error
-	require.NoError(t, err)
+	key, plainKey := createHashedKey(t, db, "test-key", []string{"admin"}, nil)
 
 	router.DELETE("/api/keys/:id", APIKeyAuth("admin"), HandleRevokeAPIKey)
 
 	// Пытаемся удалить свой же ключ
 	req := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/keys/%d", key.ID), nil)
-	req.Header.Set("X-API-Key", key.Key)
+	req.Header.Set("X-API-Key", plainKey)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -204,14 +234,9 @@ func TestAPIKeyRevokeOwnKey(t *testing.T) {
 func TestAPIKeyIPRestriction(t *testing.T) {
 	router, _, db := setupAPIKeyTest(t)
 
-	permsJSON, _ := json.Marshal([]string{"*"})
-	ipKey := &APIKey{
-		Name:        "ip-key",
-		Permissions: string(permsJSON),
-		IPAddress:   "192.168.1.100",
-	}
-	err := db.Create(ipKey).Error
-	require.NoError(t, err)
+	ipKey, plainKey := createHashedKey(t, db, "ip-key", []string{"*"}, nil)
+	ipKey.IPAddress = "192.168.1.100"
+	db.Save(ipKey)
 
 	router.GET("/test", APIKeyAuth(""), func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"success": true})
@@ -219,7 +244,7 @@ func TestAPIKeyIPRestriction(t *testing.T) {
 
 	// Запрос с другого IP
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
-	req.Header.Set("X-API-Key", ipKey.Key)
+	req.Header.Set("X-API-Key", plainKey)
 	req.RemoteAddr = "10.0.0.1:12345"
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -353,6 +378,57 @@ func TestAPIKeyValidation(t *testing.T) {
 			} else {
 				assert.Equal(t, http.StatusCreated, w.Code)
 			}
+		})
+	}
+}
+
+// TestHashAPIKeyCost12 проверяет что хеширование использует cost 12
+func TestHashAPIKeyCost12(t *testing.T) {
+	key := "test-api-key-12345"
+	hash, err := hashAPIKey(key)
+	require.NoError(t, err)
+
+	// Проверка что хеш начинается с $2a$12$ (cost 12)
+	assert.Contains(t, hash, "$2a$12$", "Hash should use cost 12")
+
+	// Проверка что один и тот же ключ даёт разные хеши (из-за соли)
+	hash2, _ := hashAPIKey(key)
+	assert.NotEqual(t, hash, hash2, "Same key should produce different hashes due to salt")
+}
+
+// TestVerifyAPIKey проверяет корректность проверки ключей
+func TestVerifyAPIKey(t *testing.T) {
+	plainKey := "test-verify-key"
+
+	hash, err := hashAPIKey(plainKey)
+	require.NoError(t, err)
+
+	// Правильный ключ
+	assert.True(t, verifyAPIKey(plainKey, hash), "Valid key should verify")
+
+	// Неправильный ключ
+	assert.False(t, verifyAPIKey("wrong-key", hash), "Wrong key should not verify")
+
+	// Пустой ключ
+	assert.False(t, verifyAPIKey("", hash), "Empty key should not verify")
+}
+
+// TestGenerateKeyPrefix проверяет генерацию префикса
+func TestGenerateKeyPrefix(t *testing.T) {
+	tests := []struct {
+		key      string
+		expected string
+	}{
+		{"test-api-key-12345", "test-api-key"},
+		{"short", "short"},
+		{"exactlytwelve", "exactlytwelv"},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			prefix := generateKeyPrefix(tt.key)
+			assert.Equal(t, tt.expected, prefix)
 		})
 	}
 }

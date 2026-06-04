@@ -178,7 +178,7 @@ func InitDatabase() error {
 			}
 
 			defaultKey := &APIKey{
-				Key:         "-",
+				Key:         keyHash,
 				KeyHash:     keyHash,
 				KeyPrefix:   generateKeyPrefix(bootstrapKey),
 				Name:        "bootstrap-admin",

@@ -529,7 +529,7 @@ func HandleCreateAPIKey(c *gin.Context) {
 	}
 
 	apiKey := &APIKey{
-		Key:         "-",
+		Key:         keyHash,
 		KeyHash:     keyHash,
 		KeyPrefix:   generateKeyPrefix(plainKey),
 		Name:        req.Name,
