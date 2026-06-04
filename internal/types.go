@@ -228,22 +228,18 @@ func (AuditLog) TableName() string {
 }
 
 type APIKey struct {
-	ID          uint   `gorm:"primaryKey" json:"id"`
-	Key         string `gorm:"type:varchar(64);not null;uniqueIndex" json:"-"`
-	Name        string `gorm:"type:varchar(100);not null" json:"name"`
-	Description string `gorm:"type:text" json:"description"`
-
-	// ✅ ИСПРАВЛЕНО: используем jsonb вместо text[]
-	Permissions string `gorm:"type:jsonb" json:"permissions"`
-
-	IPAddress string     `gorm:"type:varchar(45)" json:"ip_address"`
-	ExpiresAt *time.Time `gorm:"index" json:"expires_at"`
-
-	LastUsedAt *time.Time `json:"last_used_at"`
-	CreatedAt  time.Time  `json:"created_at"`
-	UpdatedAt  time.Time  `json:"updated_at"`
-	KeyHash    string     `gorm:"type:varchar(255);not null;uniqueIndex" json:"-"` // Хеш вместо ключа
-	KeyPrefix  string     `gorm:"type:varchar(20);not null;index" json:"-"`        // Префикс для поиска
+	ID          uint       `gorm:"primaryKey" json:"id"`
+	Key         string     `gorm:"type:varchar(64);not null;uniqueIndex" json:"-"`
+	Name        string     `gorm:"type:varchar(100);not null" json:"name"`
+	Description string     `gorm:"type:text" json:"description"`
+	Permissions string     `gorm:"type:jsonb" json:"permissions"`
+	IPAddress   string     `gorm:"type:varchar(45)" json:"ip_address"`
+	ExpiresAt   *time.Time `gorm:"index" json:"expires_at"`
+	LastUsedAt  *time.Time `json:"last_used_at"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+	KeyHash     string     `gorm:"type:varchar(255);uniqueIndex" json:"-"`
+	KeyPrefix   string     `gorm:"type:varchar(20);index" json:"-"`
 }
 
 func (APIKey) TableName() string {
