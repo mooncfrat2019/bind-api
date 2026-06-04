@@ -35,6 +35,7 @@ func setupTest(t *testing.T) (*gin.Engine, *gorm.DB, string) {
 	require.NoError(t, err)
 
 	testKey := &APIKey{
+		Key:         "-",
 		KeyHash:     keyHash,
 		KeyPrefix:   generateKeyPrefix(plainKey),
 		Name:        "test-key",
