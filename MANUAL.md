@@ -593,7 +593,7 @@ success=$(echo "$response" | jq -r '.success')
 named_status=$(echo "$response" | jq -r '.data.named_status')
 
 if [ "$success" = "true" ] && [ "$named_status" = "active" ]; then
-    echo "✅ DNS сервер работает нормально"
+    echo " DNS сервер работает нормально"
 else
     echo "❌ Проблема с DNS сервером!"
     echo "$response"
@@ -711,7 +711,7 @@ curl -X POST "$API_URL/write/zone/$ZONE_NAME/record" \
 echo -e "\n=== Проверка ==="
 curl -s -H "X-API-Key: $API_KEY" "$API_URL/read/zone/$ZONE_NAME" | jq '.data.records[] | {name, type, value}'
 
-echo -e "\n✅ DNS-зона $ZONE_NAME успешно развёрнута!"
+echo -e "\n DNS-зона $ZONE_NAME успешно развёрнута!"
 ```
 
 ### 11.2. Скрипт для мониторинга реплики
@@ -742,7 +742,7 @@ check_replica() {
         return 1
     fi
     
-    echo "✅ Реплика синхронизирована нормально"
+    echo " Реплика синхронизирована нормально"
     return 0
 }
 
@@ -770,7 +770,7 @@ for zone in $zones; do
         | jq . > "$BACKUP_DIR/${zone}.json"
 done
 
-echo "✅ Бэкап сохранён в $BACKUP_DIR"
+echo " Бэкап сохранён в $BACKUP_DIR"
 ```
 
 ---

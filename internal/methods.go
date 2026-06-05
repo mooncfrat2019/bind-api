@@ -346,7 +346,7 @@ func flushBatch() {
 	PendingReload = true
 
 	elapsed := time.Since(startTime)
-	log.Printf("✅ Пакет из %d заданий применён за %v", len(jobs), elapsed)
+	log.Printf(" Пакет из %d заданий применён за %v", len(jobs), elapsed)
 }
 
 // applyAddRecordToFile применяет добавление записи к файлу (без блокировок)
@@ -1715,7 +1715,6 @@ func (h *SyncHandler) GetSyncFile(c *gin.Context) {
 	log.Printf("Запрос файла: type=%s, name=%s (decoded: %s)", fileType, fileName, decodedFileName)
 
 	var state SyncState
-	// ✅ ДОБАВЛЕНО: Order("version DESC")
 	if err := h.db.Where("file_type = ? AND file_name = ?", fileType, decodedFileName).
 		Order("version DESC").
 		First(&state).Error; err != nil {
@@ -1745,8 +1744,7 @@ func (h *SyncHandler) GetSyncFile(c *gin.Context) {
 func (h *SyncHandler) GetSyncZones(c *gin.Context) {
 	var zones []string
 
-	// Возвращаем только уникальные имена зон
-	err := h.db.Table("sync_states").
+	err := h.db.Model(&SyncState{}).
 		Where("file_type = ?", "zone_file").
 		Distinct("zone_name").
 		Pluck("zone_name", &zones).Error
@@ -1775,7 +1773,7 @@ func (h *SyncHandler) GetSyncZone(c *gin.Context) {
 	zoneName := c.Param("zoneName")
 	var state SyncState
 
-	// ✅ ДОБАВЛЕНО: Order("version DESC")
+	// ДОБАВЛЕНО: Order("version DESC")
 	if err := h.db.Where("file_type = ? AND zone_name = ?", "zone_file", zoneName).
 		Order("version DESC").
 		First(&state).Error; err != nil {
@@ -1808,7 +1806,7 @@ func (h *SyncHandler) GetSyncFileQuery(c *gin.Context) {
 	log.Printf("Запрос файла (query): type=%s, name=%s", fileType, fileName)
 
 	var state SyncState
-	// ✅ ДОБАВЛЕНО: Order("version DESC")
+	//  ДОБАВЛЕНО: Order("version DESC")
 	if err := h.db.Where("file_type = ? AND file_name = ?", fileType, fileName).
 		Order("version DESC").
 		First(&state).Error; err != nil {
@@ -2813,7 +2811,7 @@ func saveNamedConfVersion(filePath, checksum string) {
 		return
 	}
 
-	log.Printf("✅ Сохранена версия %d для %s (checksum: %s...)", newVersion, filePath, checksum[:16])
+	log.Printf(" Сохранена версия %d для %s (checksum: %s...)", newVersion, filePath, checksum[:16])
 }
 
 // CheckARecordResolve проверяет, резолвится ли A запись через DNS реплики
@@ -3182,9 +3180,9 @@ func CleanupOrphanSyncStates() {
 	}
 
 	if deletedCount > 0 {
-		log.Printf("✅ Очистка SyncStates завершена. Удалено зон: %d", deletedCount)
+		log.Printf(" Очистка SyncStates завершена. Удалено зон: %d", deletedCount)
 	} else {
-		log.Printf("✅ Очистка SyncStates завершена. Удаленных зон не найдено")
+		log.Printf(" Очистка SyncStates завершена. Удаленных зон не найдено")
 	}
 }
 

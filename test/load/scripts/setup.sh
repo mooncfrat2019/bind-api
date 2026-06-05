@@ -20,14 +20,14 @@ EOF
 # Создание API-ключа с хешированием
 log_info "Создание API-ключа в БД..."
 
-# ✅ ПЛАИНТЕКС КЛЮЧ (используется в тестах)
+#  ПЛАИНТЕКС КЛЮЧ (используется в тестах)
 TEST_API_KEY="test-api-key-12345"
 
 # ПРЕДВАРИТЕЛЬНО ВЫЧИСЛЕННЫЙ BCRYPT ХЕШ
 # Хеш детерминированный для тестов (cost=10)
 TEST_KEY_HASH='$2a$12$2R/TUkPxyCtpcsygQvBNyOH1G9LGjAEuzKOFJyTrQRc/Ww9/ugs36'
 
-# ✅ ПРЕФИКС ДЛЯ ПОИСКА (первые 12 символов ключа)
+#  ПРЕФИКС ДЛЯ ПОИСКА (первые 12 символов ключа)
 TEST_KEY_PREFIX="${TEST_API_KEY:0:12}"
 
 PGPASSWORD=test_password psql -h postgres -U test_user -d dns_test << EOF
