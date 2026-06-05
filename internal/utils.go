@@ -2,6 +2,7 @@ package internal
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,7 +48,9 @@ func sendResponse(c *gin.Context, status int, success bool, message string, data
 
 func reloadBind() error {
 	log.Println("Выполнение rndc reload...")
-	cmd := exec.Command("rndc", "reload")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "rndc", "reload")
 	out, err := cmd.CombinedOutput()
 	log.Printf("rndc reload output: %s, error: %v", string(out), err)
 	if err != nil {
@@ -57,38 +61,71 @@ func reloadBind() error {
 }
 
 func fixPermissions(filename string) error {
-	cmd := exec.Command("chown", "named:named", filename)
+	// Проверка пути перед использованием
+	filename = filepath.Clean(filename)
+	if !strings.HasPrefix(filename, "/var/named/") &&
+		!strings.HasPrefix(filename, "/etc/named") {
+		log.Printf("WARNING: fixPermissions отклонён для подозрительного пути: %s", filename)
+		return fmt.Errorf("недопустимый путь файла")
+	}
+
+	// Используем CommandContext с таймаутом 10 секунд
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "chown", "named:named", filename)
 	if err := cmd.Run(); err != nil {
 		log.Printf("WARNING: chown failed for %s: %v", filename, err)
 	}
-	cmd = exec.Command("chmod", "644", filename)
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel2()
+
+	cmd = exec.CommandContext(ctx2, "chmod", "644", filename)
 	if err := cmd.Run(); err != nil {
 		log.Printf("WARNING: chmod failed for %s: %v", filename, err)
 	}
-	cmd = exec.Command("restorecon", "-v", filename)
+
+	ctx3, cancel3 := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel3()
+
+	cmd = exec.CommandContext(ctx3, "restorecon", "-v", filename)
 	_ = cmd.Run()
 	return nil
 }
 
 // validateZoneName проверяет корректность имени зоны согласно RFC 1035
 func validateZoneName(name string) bool {
-	// Базовые проверки на опасные символы
-	if strings.Contains(name, "..") || strings.Contains(name, "/") ||
-		strings.Contains(name, "\\") || strings.Contains(name, ";") ||
-		strings.Contains(name, "|") || strings.Contains(name, "&") ||
-		strings.Contains(name, "$") || strings.Contains(name, "`") {
+	// Проверка на пустое имя
+	if name == "" {
 		return false
 	}
+
+	// Проверка на опасные символы для Command Injection
+	dangerousChars := []string{
+		";", "|", "&", "$", "`", "\\", "!", "'", "\"",
+		"(", ")", "{", "}", "[", "]", "<", ">", "\n", "\r", "\t",
+	}
+	for _, char := range dangerousChars {
+		if strings.Contains(name, char) {
+			return false
+		}
+	}
+
+	// Базовые проверки на опасные символы
+	if strings.Contains(name, "..") || strings.Contains(name, "/") {
+		return false
+	}
+
+	// Проверка что имя не начинается с дефиса или точки
+	if strings.HasPrefix(name, "-") || strings.HasPrefix(name, ".") {
+		return false
+	}
+
 	// Проверка длины
 	if len(name) < 1 || len(name) > 253 {
 		return false
 	}
-
-	// Имя зоны не должно начинаться или заканчиваться на точку
-	if strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") {
-		return false
-	}
-
 	// Проверка корректности меток (частей между точками)
 	labels := strings.Split(name, ".")
 	for _, label := range labels {
@@ -340,6 +377,33 @@ func validateReverseZoneName(zoneName string) bool {
 
 	// Обычная проверка для forward зоны
 	return validateZoneName(zoneName)
+}
+
+// validateFilePath проверяет что путь к файлу безопасен
+func validateFilePath(filePath, allowedDir string) bool {
+	// Очистка пути
+	filePath = filepath.Clean(filePath)
+	allowedDir = filepath.Clean(allowedDir)
+
+	// Проверка что путь начинается с разрешённой директории
+	if !strings.HasPrefix(filePath, allowedDir) {
+		return false
+	}
+
+	// Проверка на опасные символы
+	dangerousChars := []string{";", "|", "&", "$", "`", "!", "'", "\""}
+	for _, char := range dangerousChars {
+		if strings.Contains(filePath, char) {
+			return false
+		}
+	}
+
+	// Проверка что путь не содержит ..
+	if strings.Contains(filePath, "..") {
+		return false
+	}
+
+	return true
 }
 
 func incrementSerial(zoneFile string) error {

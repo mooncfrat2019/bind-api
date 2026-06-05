@@ -2,6 +2,7 @@ package internal
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -622,6 +623,10 @@ func ensureReverseZoneExists(ip string, email string, nsIP string) error {
 
 	log.Printf("Проверка обратной зоны: %s для IP %s", reverseZoneName, ip)
 
+	if !validateZoneName(reverseZoneName) {
+		return fmt.Errorf("недопустимое имя обратной зоны: %s", reverseZoneName)
+	}
+
 	// Проверяем существует ли зона в конфиге
 	if zoneExistsInConfig(reverseZoneName) {
 		log.Printf("Обратная зона %s уже существует", reverseZoneName)
@@ -635,6 +640,11 @@ func ensureReverseZoneExists(ip string, email string, nsIP string) error {
 
 	// Создаём имя файла зоны
 	zoneFile := filepath.Join(ZoneDir, reverseZoneName+".rev")
+
+	zoneFile = filepath.Clean(zoneFile)
+	if !strings.HasPrefix(zoneFile, filepath.Clean(ZoneDir)) {
+		return fmt.Errorf("путь файла зоны вне разрешённой директории")
+	}
 
 	// Проверяем что файл ещё не существует
 	if _, err := os.Stat(zoneFile); err == nil {
@@ -717,14 +727,19 @@ zone "%s" IN {
 	exec.Command("chown", "root:named", targetConfigFile).Run()
 	exec.Command("chmod", "640", targetConfigFile).Run()
 
-	// Проверяем синтаксис
-	cmd := exec.Command("named-checkconf")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "named-checkconf")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ошибка в конфигурации: %s", string(out))
 	}
 
-	cmd = exec.Command("named-checkzone", reverseZoneName, zoneFile)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel2()
+
+	cmd = exec.CommandContext(ctx2, "named-checkzone", reverseZoneName, zoneFile)
 	out, err = cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ошибка в файле зоны: %s", string(out))
@@ -851,6 +866,9 @@ func deletePtrRecord(ip string) error {
 // --- Удаление зоны из конфига ---
 
 func removeZoneFromConfig(configFile, zoneName string) error {
+	if !validateZoneName(zoneName) {
+		return fmt.Errorf("недопустимое имя зоны: %s", zoneName)
+	}
 	if _, err := os.Stat(configFile); os.IsNotExist(err) {
 		log.Printf("Файл конфига не существует: %s", configFile)
 		return nil
@@ -907,11 +925,24 @@ func removeZoneFromConfig(configFile, zoneName string) error {
 	}
 
 	tmpFile := configFile + ".tmp"
+
+	tmpFile = filepath.Clean(tmpFile)
+	expectedDir := filepath.Dir(configFile)
+	if !strings.HasPrefix(tmpFile, filepath.Clean(expectedDir)) {
+		return fmt.Errorf("путь временного файла вне разрешённой директории")
+	}
+
 	newContent := strings.Join(newLines, "\n")
 	newContent = strings.TrimSpace(newContent) + "\n"
 
 	if err := os.WriteFile(tmpFile, []byte(newContent), origMode); err != nil {
 		return fmt.Errorf("ошибка записи временного файла: %v", err)
+	}
+
+	tmpFile = filepath.Clean(tmpFile)
+	if !strings.HasPrefix(tmpFile, filepath.Clean(expectedDir)) {
+		os.Remove(tmpFile)
+		return fmt.Errorf("путь временного файла вне разрешённой директории")
 	}
 
 	cmd := exec.Command("chown", "--reference="+configFile, tmpFile)
@@ -920,8 +951,11 @@ func removeZoneFromConfig(configFile, zoneName string) error {
 		_ = cmd.Run()
 	}
 
-	cmd = exec.Command("named-checkconf", tmpFile)
-	out, err := cmd.CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd2 := exec.CommandContext(ctx, "named-checkconf", tmpFile)
+	out, err := cmd2.CombinedOutput()
 	if err != nil {
 		os.Remove(tmpFile)
 		return fmt.Errorf("синтаксическая ошибка в конфиге: %s", string(out))
@@ -988,6 +1022,12 @@ func executeCreateZone(job *Job) JobResult {
 		zoneFile = filepath.Join(ZoneDir, job.ZoneName+".rev")
 	} else {
 		zoneFile = filepath.Join(ZoneDir, job.ZoneName+".zone")
+	}
+
+	zoneFile = filepath.Clean(zoneFile)
+	if !strings.HasPrefix(zoneFile, filepath.Clean(ZoneDir)) {
+		err = fmt.Errorf("путь файла зоны вне разрешённой директории")
+		return JobResult{Success: false, Error: err}
 	}
 
 	if _, err := os.Stat(zoneFile); err == nil {
@@ -1066,15 +1106,21 @@ zone "%s" IN {
 	cmd = exec.Command("chmod", "640", targetConfigFile)
 	_ = cmd.Run()
 
-	cmd = exec.Command("named-checkconf")
-	out, err := cmd.CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd2 := exec.CommandContext(ctx, "named-checkconf")
+	out, err := cmd2.CombinedOutput()
 	if err != nil {
 		err = fmt.Errorf("ошибка в конфигурации: %s", string(out))
 		return JobResult{Success: false, Error: err}
 	}
 
-	cmd = exec.Command("named-checkzone", job.ZoneName, zoneFile)
-	out, err = cmd.CombinedOutput()
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel2()
+
+	cmd2 = exec.CommandContext(ctx2, "named-checkzone", job.ZoneName, zoneFile)
+	out, err = cmd2.CombinedOutput()
 	if err != nil {
 		err = fmt.Errorf("ошибка в файле зоны: %s", string(out))
 		return JobResult{Success: false, Error: err}
@@ -1163,7 +1209,10 @@ func executeDeleteZone(job *Job) JobResult {
 	}
 
 	// Проверяем синтаксис конфига
-	cmd := exec.Command("named-checkconf")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "named-checkconf")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		err = fmt.Errorf("ошибка в конфигурации: %s", string(out))
@@ -1915,6 +1964,12 @@ func (h *SyncHandler) RollbackVersion(c *gin.Context) {
 	err := withFileLock(state.FileName, func() error {
 		// Записываем контент во временный файл
 		tmpPath := state.FileName + ".rollback.tmp"
+		// Проверка пути
+		tmpPath = filepath.Clean(tmpPath)
+		expectedDir := filepath.Dir(state.FileName)
+		if !strings.HasPrefix(tmpPath, filepath.Clean(expectedDir)) {
+			return fmt.Errorf("путь временного файла вне разрешённой директории")
+		}
 		if err := os.WriteFile(tmpPath, []byte(state.Content), 0640); err != nil {
 			return fmt.Errorf("ошибка записи временного файла: %v", err)
 		}
@@ -1925,9 +1980,13 @@ func (h *SyncHandler) RollbackVersion(c *gin.Context) {
 
 			switch state.FileType {
 			case "zone_file":
-				cmd = exec.Command("named-checkzone", state.ZoneName, tmpPath)
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				cmd = exec.CommandContext(ctx, "named-checkzone", state.ZoneName, tmpPath)
 			case "named_conf", "zone_conf":
-				cmd = exec.Command("named-checkconf", tmpPath)
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				cmd = exec.CommandContext(ctx, "named-checkconf", tmpPath)
 			default:
 				os.Remove(tmpPath)
 				return fmt.Errorf("неподдерживаемый тип файла для rollback: %s", state.FileType)
@@ -2951,7 +3010,10 @@ func (r *ReplicaSync) CheckAndFixZones() error {
 		if needRetransfer {
 			log.Printf("Обнаружены проблемы с резолвингом зоны %s, выполняем retransfer", zoneName)
 
-			cmd := exec.Command("rndc", "retransfer", zoneName)
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+
+			cmd := exec.CommandContext(ctx, "rndc", "retransfer", zoneName)
 			output, err := cmd.CombinedOutput()
 
 			if Metrics != nil {
