@@ -43,4 +43,14 @@ var (
 	// Блокировки файлов
 	FileLocks      = make(map[string]*sync.Mutex)
 	FileLocksMutex sync.Mutex
+
+	// логирование
+	LogLevel int
+)
+
+const (
+	LevelDebug = 0
+	LevelInfo  = 1
+	LevelWarn  = 2
+	LevelError = 3
 )

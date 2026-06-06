@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -25,7 +24,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 )
 
 func InitConfig() {
@@ -85,16 +83,16 @@ func InitConfig() {
 		ZoneDir += "/"
 	}
 
-	log.Printf("Конфигурация: ZoneDir=%s, ZoneConfFile=%s, NamedConf=%s", ZoneDir, ZoneConfFile, NamedConf)
+	Debug("Конфигурация: ZoneDir=%s, ZoneConfFile=%s, NamedConf=%s", ZoneDir, ZoneConfFile, NamedConf)
 	if DbURL != "" || DbHost != "" {
-		log.Printf("PostgreSQL: Host=%s, Port=%s, User=%s, DB=%s, Schema=%s", DbHost, DbPort, DbUser, DbName, DbSchema)
+		Debug("PostgreSQL: Host=%s, Port=%s, User=%s, DB=%s, Schema=%s", DbHost, DbPort, DbUser, DbName, DbSchema)
 	}
 }
 
 func InitDatabase() error {
 	// На REPLICA пропускаем инициализацию БД
 	if AppRole == "replica" {
-		log.Println("Роль REPLICA - база данных не инициализируется")
+		Info("Роль REPLICA - база данных не инициализируется")
 		return nil
 	}
 
@@ -110,28 +108,28 @@ func InitDatabase() error {
 		)
 	}
 
-	log.Printf("Подключение к PostgreSQL...")
+	Debug("Подключение к PostgreSQL...")
 
 	maxRetries := 5
 	for i := 0; i < maxRetries; i++ {
 		Db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
-			Logger: logger.Default.LogMode(logger.Info),
+			Logger: NewGORMLogger(),
 		})
 		if err != nil {
-			log.Printf("Ошибка подключения (попытка %d/%d): %v", i+1, maxRetries, err)
+			Error("Ошибка подключения (попытка %d/%d): %v", i+1, maxRetries, err)
 			time.Sleep(2 * time.Second)
 			continue
 		}
 
 		sqlDB, err := Db.DB()
 		if err != nil {
-			log.Printf("Ошибка получения SQL DB: %v", err)
+			Error("Ошибка получения SQL DB: %v", err)
 			time.Sleep(2 * time.Second)
 			continue
 		}
 
 		if err = sqlDB.Ping(); err != nil {
-			log.Printf("Ошибка ping (попытка %d/%d): %v", i+1, maxRetries, err)
+			Error("Ошибка ping (попытка %d/%d): %v", i+1, maxRetries, err)
 			time.Sleep(2 * time.Second)
 			continue
 		}
@@ -140,17 +138,17 @@ func InitDatabase() error {
 		sqlDB.SetMaxIdleConns(5)
 		sqlDB.SetConnMaxLifetime(5 * time.Minute)
 
-		log.Println("Успешное подключение к PostgreSQL")
+		Info("Успешное подключение к PostgreSQL")
 		break
 	}
 
-	log.Println("Выполнение миграций базы данных...")
+	Info("Выполнение миграций базы данных...")
 	if err := Db.AutoMigrate(&AuditLog{}, &SyncState{}, &APIKey{}); err != nil {
 		return fmt.Errorf("ошибка миграции: %v", err)
 	}
 
 	if err := MigrateExistingKeys(); err != nil {
-		log.Printf("⚠️ Ошибка миграции ключей: %v", err)
+		Error("Ошибка миграции ключей: %v", err)
 	}
 
 	if err != nil {
@@ -161,7 +159,7 @@ func InitDatabase() error {
 	if count == 0 {
 		bootstrapKey := strings.TrimSpace(os.Getenv("BIND_API_BOOTSTRAP_KEY"))
 		if bootstrapKey == "" {
-			log.Printf("WARNING: таблица api_keys пуста, bootstrap API-ключ не создан: переменная BIND_API_BOOTSTRAP_KEY не задана")
+			Warn("таблица api_keys пуста, bootstrap API-ключ не создан: переменная BIND_API_BOOTSTRAP_KEY не задана")
 		} else {
 			if len(bootstrapKey) < 32 {
 				return fmt.Errorf("значение BIND_API_BOOTSTRAP_KEY слишком короткое: минимум 32 символа")
@@ -190,14 +188,14 @@ func InitDatabase() error {
 			}
 
 			if err := Db.Create(defaultKey).Error; err != nil {
-				log.Printf("WARNING: Не удалось создать bootstrap API-ключ из переменной окружения: %v", err)
+				Error("Не удалось создать bootstrap API-ключ из переменной окружения: %v", err)
 			} else {
-				log.Printf("✓ Bootstrap API-ключ создан из переменной окружения BIND_API_BOOTSTRAP_KEY со сроком действия 7 дней")
+				Info("Bootstrap API-ключ создан из переменной окружения BIND_API_BOOTSTRAP_KEY со сроком действия 7 дней")
 			}
 		}
 	}
 
-	log.Println("База данных PostgreSQL инициализирована")
+	Info("База данных PostgreSQL инициализирована")
 	return nil
 }
 
@@ -218,7 +216,7 @@ func queueMonitor() {
 			ModeMutex.Lock()
 			CurrentMode = "batch"
 			ModeMutex.Unlock()
-			log.Printf("🔄 Переключение в BATCH режим (очередь: %.1f%%, %d/%d)",
+			Info("Переключение в BATCH режим (очередь: %.1f%%, %d/%d)",
 				queuePercent*100, queueSize, MaxQueueSize)
 
 			// Принудительный сброс накопленных заданий
@@ -230,7 +228,7 @@ func queueMonitor() {
 			ModeMutex.Lock()
 			CurrentMode = "normal"
 			ModeMutex.Unlock()
-			log.Printf("🔄 Переключение в NORMAL режим (очередь: %.1f%%, %d/%d)",
+			Info("Переключение в NORMAL режим (очередь: %.1f%%, %d/%d)",
 				queuePercent*100, queueSize, MaxQueueSize)
 
 			// Сбрасываем накопленный пакет
@@ -287,7 +285,7 @@ func flushBatch() {
 		return
 	}
 
-	log.Printf("📦 Применение пакета из %d заданий", len(jobs))
+	Info("Применение пакета из %d заданий", len(jobs))
 	startTime := time.Now()
 
 	// Группируем задания по зонам
@@ -300,7 +298,7 @@ func flushBatch() {
 	for zoneName, zoneJobs := range jobsByZone {
 		zone, exists := getZoneFromConfig(zoneName)
 		if !exists {
-			log.Printf("Зона %s не найдена, пропускаем %d заданий", zoneName, len(zoneJobs))
+			Info("Зона %s не найдена, пропускаем %d заданий", zoneName, len(zoneJobs))
 			continue
 		}
 
@@ -317,13 +315,13 @@ func flushBatch() {
 			}
 			// Один раз увеличиваем serial для всех изменений в зоне
 			if err := incrementSerial(zone.File); err != nil {
-				log.Printf("Ошибка обновления serial для зоны %s: %v", zoneName, err)
+				Error("Ошибка обновления serial для зоны %s: %v", zoneName, err)
 			}
 			return nil
 		})
 
 		if err != nil {
-			log.Printf("Ошибка пакетной обработки зоны %s: %v", zoneName, err)
+			Error("Ошибка пакетной обработки зоны %s: %v", zoneName, err)
 			// Отмечаем задания как упавшие
 			for _, job := range zoneJobs {
 				logAudit(job, "FAILED", err.Error())
@@ -347,7 +345,7 @@ func flushBatch() {
 	PendingReload = true
 
 	elapsed := time.Since(startTime)
-	log.Printf(" Пакет из %d заданий применён за %v", len(jobs), elapsed)
+	Info(" Пакет из %d заданий применён за %v", len(jobs), elapsed)
 }
 
 // applyAddRecordToFile применяет добавление записи к файлу (без блокировок)
@@ -376,9 +374,9 @@ func batchReloadWorker() {
 	for range ticker.C {
 		if PendingReload {
 			if err := reloadBind(); err != nil {
-				log.Printf("❌ Периодический reload failed: %v", err)
+				Error("Периодический reload failed: %v", err)
 			} else {
-				log.Printf("🔄 Периодический reload BIND выполнен")
+				Info("Периодический reload BIND выполнен")
 				PendingReload = false
 			}
 		}
@@ -402,7 +400,7 @@ func InitJobQueue() {
 	// Разбор очередей по таймеру
 	go batchFlushTimer()
 
-	log.Printf("Адаптивная очередь заданий инициализирована")
+	Info("Адаптивная очередь заданий инициализирована")
 }
 
 func batchFlushTimer() {
@@ -427,7 +425,7 @@ func jobWorker() {
 }
 
 func processJob(job *Job) {
-	log.Printf("Обработка задания %d: %s для зоны %s", job.ID, job.Type, job.ZoneName)
+	Debug("Обработка задания %d: %s для зоны %s", job.ID, job.Type, job.ZoneName)
 
 	logAudit(job, "STARTED", "")
 
@@ -503,7 +501,7 @@ func logAudit(job *Job, status string, errMsg string) {
 	}
 
 	if err := Db.Create(&audit).Error; err != nil {
-		log.Printf("WARNING: Не удалось записать аудит: %v", err)
+		Error("Не удалось записать аудит: %v", err)
 	}
 }
 
@@ -518,14 +516,14 @@ func parseZoneConfig() ([]ZoneConfig, error) {
 		configFiles = append(configFiles, ZoneConfFile)
 	}
 
-	log.Printf("Парсинг конфигов: %v", configFiles)
+	Debug("Парсинг конфигов: %v", configFiles)
 
 	zoneRegex := regexp.MustCompile(`zone\s+"([^"]+)"\s+(?:IN\s+)?\{[^}]*file\s+"([^"]+)"`)
 
 	for _, configFile := range configFiles {
 		content, err := os.ReadFile(configFile)
 		if err != nil {
-			log.Printf("WARNING: Не удалось прочитать конфиг %s: %v", configFile, err)
+			Error("Не удалось прочитать конфиг %s: %v", configFile, err)
 			continue
 		}
 
@@ -567,7 +565,7 @@ func parseZoneConfig() ([]ZoneConfig, error) {
 					Type:       zoneType,
 					ConfigFile: configFile,
 				})
-				log.Printf("Найдена зона: %s -> %s (конфиг: %s)", zoneName, zoneFile, configFile)
+				Debug("Найдена зона: %s -> %s (конфиг: %s)", zoneName, zoneFile, configFile)
 			}
 		}
 	}
@@ -578,18 +576,18 @@ func parseZoneConfig() ([]ZoneConfig, error) {
 func getZoneFromConfig(zoneName string) (*ZoneConfig, bool) {
 	zones, err := parseZoneConfig()
 	if err != nil {
-		log.Printf("Ошибка парсинга конфига: %v", err)
+		Error("Ошибка парсинга конфига: %v", err)
 		return nil, false
 	}
 
 	for _, zone := range zones {
 		if zone.Name == zoneName {
-			log.Printf("Найдена зона %s: файл=%s, конфиг=%s", zoneName, zone.File, zone.ConfigFile)
+			Debug("Найдена зона %s: файл=%s, конфиг=%s", zoneName, zone.File, zone.ConfigFile)
 			return &zone, true
 		}
 	}
 
-	log.Printf("Зона %s не найдена в конфиге", zoneName)
+	Info("Зона %s не найдена в конфиге", zoneName)
 	return nil, false
 }
 
@@ -622,7 +620,7 @@ func ensureReverseZoneExists(ip string, email string, nsIP string) error {
 		return fmt.Errorf("не удалось получить имя обратной зоны: %v", err)
 	}
 
-	log.Printf("Проверка обратной зоны: %s для IP %s", reverseZoneName, ip)
+	Debug("Проверка обратной зоны: %s для IP %s", reverseZoneName, ip)
 
 	if !validateZoneName(reverseZoneName) {
 		return fmt.Errorf("недопустимое имя обратной зоны: %s", reverseZoneName)
@@ -630,11 +628,11 @@ func ensureReverseZoneExists(ip string, email string, nsIP string) error {
 
 	// Проверяем существует ли зона в конфиге
 	if zoneExistsInConfig(reverseZoneName) {
-		log.Printf("Обратная зона %s уже существует", reverseZoneName)
+		Debug("Обратная зона %s уже существует", reverseZoneName)
 		return nil
 	}
 
-	log.Printf("Обратная зона %s не найдена, создаём...", reverseZoneName)
+	Debug("Обратная зона %s не найдена, создаём...", reverseZoneName)
 
 	// ЖЕСТКО ИСПОЛЬЗУЕМ NamedConf
 	targetConfigFile := NamedConf
@@ -649,7 +647,7 @@ func ensureReverseZoneExists(ip string, email string, nsIP string) error {
 
 	// Проверяем что файл ещё не существует
 	if _, err := os.Stat(zoneFile); err == nil {
-		log.Printf("Файл зоны %s уже существует, пропускаем создание", zoneFile)
+		Debug("Файл зоны %s уже существует, пропускаем создание", zoneFile)
 		return nil
 	}
 
@@ -746,7 +744,7 @@ zone "%s" IN {
 		return fmt.Errorf("ошибка в файле зоны: %s", string(out))
 	}
 
-	log.Printf("Обратная зона %s создана: файл=%s, конфиг=%s", reverseZoneName, zoneFile, targetConfigFile)
+	Debug("Обратная зона %s создана: файл=%s, конфиг=%s", reverseZoneName, zoneFile, targetConfigFile)
 
 	// Обновляем состояние для синхронизации
 	if SH != nil {
@@ -776,20 +774,20 @@ func getPtrRecordName(ip string) (string, error) {
 }
 
 func addPtrRecord(ip string, ptrName string, ttl int) error {
-	log.Printf("Добавление PTR записи: IP=%s, PTR=%s", ip, ptrName)
+	Debug("Добавление PTR записи: IP=%s, PTR=%s", ip, ptrName)
 
 	reverseZoneName, err := getReverseZoneName(ip)
 	if err != nil {
 		return fmt.Errorf("ошибка получения имени обратной зоны: %v", err)
 	}
-	log.Printf("Имя обратной зоны: %s", reverseZoneName)
+	Debug("Имя обратной зоны: %s", reverseZoneName)
 
 	zone, exists := getZoneFromConfig(reverseZoneName)
 	if !exists {
 		return fmt.Errorf("обратная зона %s не найдена в конфигурации", reverseZoneName)
 	}
 
-	log.Printf("Файл обратной зоны: %s, конфиг: %s", zone.File, zone.ConfigFile)
+	Debug("Файл обратной зоны: %s, конфиг: %s", zone.File, zone.ConfigFile)
 
 	if _, err := os.Stat(zone.File); os.IsNotExist(err) {
 		return fmt.Errorf("файл обратной зоны не существует: %s", zone.File)
@@ -799,14 +797,14 @@ func addPtrRecord(ip string, ptrName string, ttl int) error {
 	if err != nil {
 		return fmt.Errorf("ошибка получения имени PTR записи: %v", err)
 	}
-	log.Printf("Имя PTR записи (октет): %s", ptrRecordName)
+	Debug("Имя PTR записи (октет): %s", ptrRecordName)
 
 	if ttl == 0 {
 		ttl = DefaultTTL
 	}
 
 	recordLine := fmt.Sprintf("%s\t%d\tIN\tPTR\t%s", ptrRecordName, ttl, ptrName)
-	log.Printf("Строка PTR записи: %s", recordLine)
+	Debug("Строка PTR записи: %s", recordLine)
 
 	if err := appendRecordToFile(zone.File, recordLine); err != nil {
 		return fmt.Errorf("ошибка добавления записи в файл: %v", err)
@@ -820,12 +818,12 @@ func addPtrRecord(ip string, ptrName string, ttl int) error {
 		return err
 	}
 
-	log.Printf("PTR запись добавлена успешно")
+	Info("PTR запись добавлена успешно")
 	return nil
 }
 
 func deletePtrRecord(ip string) error {
-	log.Printf("Удаление PTR записи для IP: %s", ip)
+	Debug("Удаление PTR записи для IP: %s", ip)
 
 	reverseZoneName, err := getReverseZoneName(ip)
 	if err != nil {
@@ -834,12 +832,12 @@ func deletePtrRecord(ip string) error {
 
 	zone, exists := getZoneFromConfig(reverseZoneName)
 	if !exists {
-		log.Printf("Обратная зона %s не найдена в конфиге, пропускаем удаление PTR", reverseZoneName)
+		Warn("Обратная зона %s не найдена в конфиге, пропускаем удаление PTR", reverseZoneName)
 		return nil
 	}
 
 	if _, err := os.Stat(zone.File); os.IsNotExist(err) {
-		log.Printf("Файл обратной зоны не существует: %s", zone.File)
+		Warn("Файл обратной зоны не существует: %s", zone.File)
 		return nil
 	}
 
@@ -860,7 +858,7 @@ func deletePtrRecord(ip string) error {
 		return err
 	}
 
-	log.Printf("PTR запись удалена успешно")
+	Info("PTR запись удалена успешно")
 	return nil
 }
 
@@ -871,7 +869,7 @@ func removeZoneFromConfig(configFile, zoneName string) error {
 		return fmt.Errorf("недопустимое имя зоны: %s", zoneName)
 	}
 	if _, err := os.Stat(configFile); os.IsNotExist(err) {
-		log.Printf("Файл конфига не существует: %s", configFile)
+		Warn("Файл конфига не существует: %s", configFile)
 		return nil
 	}
 
@@ -880,7 +878,7 @@ func removeZoneFromConfig(configFile, zoneName string) error {
 		return fmt.Errorf("ошибка получения информации о файле: %v", err)
 	}
 	origMode := origInfo.Mode()
-	log.Printf("Оригинальные права файла %s: %s", configFile, origMode)
+	Debug("Оригинальные права файла %s: %s", configFile, origMode)
 
 	content, err := os.ReadFile(configFile)
 	if err != nil {
@@ -897,7 +895,7 @@ func removeZoneFromConfig(configFile, zoneName string) error {
 		trimmed := strings.TrimSpace(line)
 
 		if !skip && strings.HasPrefix(trimmed, "zone") && strings.Contains(trimmed, fmt.Sprintf(`"%s"`, zoneName)) {
-			log.Printf("Найдена зона %s на строке %d", zoneName, i+1)
+			Debug("Найдена зона %s на строке %d", zoneName, i+1)
 			zoneFound = true
 			skip = true
 			braceCount += strings.Count(line, "{")
@@ -910,7 +908,7 @@ func removeZoneFromConfig(configFile, zoneName string) error {
 			braceCount -= strings.Count(line, "}")
 
 			if braceCount <= 0 {
-				log.Printf("Конец блока зоны на строке %d", i+1)
+				Debug("Конец блока зоны на строке %d", i+1)
 				skip = false
 				braceCount = 0
 			}
@@ -921,7 +919,7 @@ func removeZoneFromConfig(configFile, zoneName string) error {
 	}
 
 	if !zoneFound {
-		log.Printf("Зона %s не найдена в конфиге %s", zoneName, configFile)
+		Debug("Зона %s не найдена в конфиге %s", zoneName, configFile)
 		return nil
 	}
 
@@ -973,7 +971,7 @@ func removeZoneFromConfig(configFile, zoneName string) error {
 	cmd = exec.Command("chown", "root:named", configFile)
 	_ = cmd.Run()
 
-	log.Printf("Зона %s удалена из конфига %s", zoneName, configFile)
+	Info("Зона %s удалена из конфига %s", zoneName, configFile)
 	return nil
 }
 
@@ -1134,13 +1132,13 @@ zone "%s" IN {
 
 	if currentMode == "normal" {
 		if err := reloadBind(); err != nil {
-			log.Printf("WARNING: reload после создания зоны %s не выполнен: %v", job.ZoneName, err)
+			Error("WARNING: reload после создания зоны %s не выполнен: %v", job.ZoneName, err)
 		} else {
-			log.Printf("✓ Reload выполнен после создания зоны %s", job.ZoneName)
+			Info("Reload выполнен после создания зоны %s", job.ZoneName)
 		}
 	} else {
 		PendingReload = true
-		log.Printf("📦 Batch режим: создана зона %s, reload будет выполнен позже", job.ZoneName)
+		Info("Batch режим: создана зона %s, reload будет выполнен позже", job.ZoneName)
 	}
 
 	// Обновляем состояние для синхронизации
@@ -1186,7 +1184,7 @@ func executeDeleteZone(job *Job) JobResult {
 		return JobResult{Success: false, Error: err}
 	}
 
-	log.Printf("Удаление зоны %s: файл=%s, конфиг=%s", job.ZoneName, zone.File, zone.ConfigFile)
+	Debug("Удаление зоны %s: файл=%s, конфиг=%s", job.ZoneName, zone.File, zone.ConfigFile)
 
 	// Удаляем файл зоны
 	err = withFileLock(zone.File, func() error {
@@ -1226,9 +1224,9 @@ func executeDeleteZone(job *Job) JobResult {
 			Delete(&SyncState{})
 
 		if result.Error != nil {
-			log.Printf("⚠️ Ошибка удаления зоны %s из sync_states: %v", job.ZoneName, result.Error)
+			Error("Ошибка удаления зоны %s из sync_states: %v", job.ZoneName, result.Error)
 		} else {
-			log.Printf("🗑️ Зона %s удалена из sync_states (удалено %d записей)",
+			Info("🗑️ Зона %s удалена из sync_states (удалено %d записей)",
 				job.ZoneName, result.RowsAffected)
 		}
 	}
@@ -1377,7 +1375,7 @@ func executeAddRecord(job *Job) JobResult {
 			job.RecordName, ttl, recordType, job.RecordValue)
 	}
 
-	log.Printf("📝 Асинхронное добавление записи в зону %s: %s", job.ZoneName, recordLine)
+	Debug("Асинхронное добавление записи в зону %s: %s", job.ZoneName, recordLine)
 
 	// === АСИНХРОННАЯ ЗАПИСЬ ===
 	// Запись добавляется в буфер, ответ возвращается мгновенно
@@ -1411,7 +1409,7 @@ func executeAddRecord(job *Job) JobResult {
 
 			// Создаем обратную зону если нужно
 			if err := ensureReverseZoneExists(job.RecordValue, zoneEmail, zoneNsIP); err != nil {
-				log.Printf("WARNING: Не удалось создать обратную зону для %s: %v", job.RecordValue, err)
+				Error("Не удалось создать обратную зону для %s: %v", job.RecordValue, err)
 			}
 
 			// Добавляем PTR запись
@@ -1426,7 +1424,7 @@ func executeAddRecord(job *Job) JobResult {
 			}
 
 			if err := addPtrRecord(job.RecordValue, ptrName, ttl); err != nil {
-				log.Printf("WARNING: Не удалось создать PTR запись: %v", err)
+				Error("Не удалось создать PTR запись: %v", err)
 			}
 		}()
 	}
@@ -1441,7 +1439,7 @@ func executeAddRecord(job *Job) JobResult {
 		go Metrics.UpdateBusinessMetrics()
 	}
 
-	log.Printf("✓ Запись %s типа %s принята в буфер для зоны %s (асинхронно)",
+	Info("Запись %s типа %s принята в буфер для зоны %s (асинхронно)",
 		job.RecordName, recordType, job.ZoneName)
 
 	return JobResult{
@@ -1493,7 +1491,7 @@ func executeDeleteRecord(job *Job) JobResult {
 			for _, rec := range records {
 				if rec.Name == job.RecordName && rec.Type == recordType {
 					if err := deletePtrRecord(rec.Value); err != nil {
-						log.Printf("WARNING: Не удалось удалить PTR запись: %v", err)
+						Error("Не удалось удалить PTR запись: %v", err)
 					}
 					break
 				}
@@ -1524,13 +1522,13 @@ func executeDeleteRecord(job *Job) JobResult {
 
 	if currentMode == "normal" {
 		if err := reloadBind(); err != nil {
-			log.Printf("WARNING: reload после удаления записи %s не выполнен: %v", job.RecordName, err)
+			Error("WARNING: reload после удаления записи %s не выполнен: %v", job.RecordName, err)
 		} else {
-			log.Printf("✓ Reload выполнен после удаления записи %s", job.RecordName)
+			Info("Reload выполнен после удаления записи %s", job.RecordName)
 		}
 	} else {
 		PendingReload = true
-		log.Printf("📦 Batch режим: удалена запись %s, reload будет выполнен позже", job.RecordName)
+		Info("Batch режим: удалена запись %s, reload будет выполнен позже", job.RecordName)
 	}
 
 	// Обновляем состояние для синхронизации
@@ -1597,7 +1595,7 @@ func (h *SyncHandler) UpdateSyncState(fileType, fileName, zoneName, filePath, ch
 		return 0, fmt.Errorf("ошибка сохранения версии: %v", err)
 	}
 
-	log.Printf("Создана версия %d (ID=%d) для %s", newVersion, state.ID, fileName)
+	Info("Создана версия %d (ID=%d) для %s", newVersion, state.ID, fileName)
 
 	return state.ID, nil
 }
@@ -1614,7 +1612,7 @@ func (h *SyncHandler) SyncAuthMiddleware() gin.HandlerFunc {
 
 		// Проверяем не заблокирован ли IP
 		if IsIPBlocked(clientIP) {
-			log.Printf("⚠️ Запрос с заблокированного IP: %s", clientIP)
+			Warn("Запрос с заблокированного IP: %s", clientIP)
 			c.JSON(http.StatusForbidden, gin.H{
 				"success": false,
 				"message": "IP адрес временно заблокирован",
@@ -1630,7 +1628,7 @@ func (h *SyncHandler) SyncAuthMiddleware() gin.HandlerFunc {
 		// Проверяем токен с защитой от timing attack
 		if token == "" || expectedToken == "" ||
 			subtle.ConstantTimeCompare([]byte(token), []byte(expectedToken)) != 1 {
-			log.Printf("[WARNING] Неверный токен синхронизации с IP: %s", clientIP)
+			Warn("Неверный токен синхронизации с IP: %s", clientIP)
 			RecordFailedAttempt(clientIP) // ← Записываем попытку
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"success": false,
@@ -1642,7 +1640,7 @@ func (h *SyncHandler) SyncAuthMiddleware() gin.HandlerFunc {
 
 		// Проверяем подсеть (если указана)
 		if expectedSubnet != "" && !IsIPInSubnet(clientIP, expectedSubnet) {
-			log.Printf("[WARNING] Токен действителен, но IP %s вне разрешённой подсети %s", clientIP, expectedSubnet)
+			Warn("Токен действителен, но IP %s вне разрешённой подсети %s", clientIP, expectedSubnet)
 			c.JSON(http.StatusForbidden, gin.H{
 				"success": false,
 				"message": "Доступ запрещён с этого IP адреса",
@@ -1668,7 +1666,7 @@ func (h *SyncHandler) GetSyncFileByQuery(c *gin.Context) {
 		return
 	}
 
-	log.Printf("Запрос файла (query): type=%s, name=%s", fileType, fileName)
+	Debug("Запрос файла (query): type=%s, name=%s", fileType, fileName)
 
 	var state SyncState
 	// Ищем точно по имени файла
@@ -1741,7 +1739,7 @@ func (h *SyncHandler) GetSyncFile(c *gin.Context) {
 		decodedFileName = fileName
 	}
 
-	log.Printf("Запрос файла: type=%s, name=%s (decoded: %s)", fileType, fileName, decodedFileName)
+	Debug("Запрос файла: type=%s, name=%s (decoded: %s)", fileType, fileName, decodedFileName)
 
 	var state SyncState
 	if err := h.db.Where("file_type = ? AND file_name = ?", fileType, decodedFileName).
@@ -1832,7 +1830,7 @@ func (h *SyncHandler) GetSyncZone(c *gin.Context) {
 func (h *SyncHandler) GetSyncFileQuery(c *gin.Context) {
 	fileType := c.Query("type")
 	fileName := c.Query("name")
-	log.Printf("Запрос файла (query): type=%s, name=%s", fileType, fileName)
+	Debug("Запрос файла (query): type=%s, name=%s", fileType, fileName)
 
 	var state SyncState
 	//  ДОБАВЛЕНО: Order("version DESC")
@@ -1967,7 +1965,7 @@ func (h *SyncHandler) RollbackVersion(c *gin.Context) {
 		return
 	}
 
-	log.Printf("Откат версии %d для %s (type: %s)", state.Version, state.FileName, state.FileType)
+	Info("Откат версии %d для %s (type: %s)", state.Version, state.FileName, state.FileType)
 
 	switch state.FileType {
 	case "zone_file", "named_conf", "zone_conf":
@@ -2172,11 +2170,11 @@ func NewReplicaSync(masterURL, apiToken string, intervalSeconds int, enabled boo
 
 func (r *ReplicaSync) Start() {
 	if !r.Enabled {
-		log.Println("Синхронизация с мастером отключена")
+		Warn("Синхронизация с мастером отключена")
 		return
 	}
 
-	log.Printf("Запуск синхронизации с мастером %s (интервал: %v)", r.MasterURL, r.Interval)
+	Info("Запуск синхронизации с мастером %s (интервал: %v)", r.MasterURL, r.Interval)
 
 	go func() {
 		ticker := time.NewTicker(r.Interval)
@@ -2194,7 +2192,7 @@ func (r *ReplicaSync) sync() {
 	r.mu.Lock()
 	if r.isSyncing {
 		r.mu.Unlock()
-		log.Println("Синхронизация уже выполняется, пропускаем")
+		Info("Синхронизация уже выполняется, пропускаем")
 		return
 	}
 	r.isSyncing = true
@@ -2206,28 +2204,28 @@ func (r *ReplicaSync) sync() {
 		r.mu.Unlock()
 	}()
 
-	log.Println("=== Начало синхронизации с мастером ===")
+	Info("=== Начало синхронизации с мастером ===")
 	startTime := time.Now()
 
 	// Существующая синхронизация файлов
 	masterState, err := r.getMasterState()
 	if err != nil {
-		log.Printf("❌ Ошибка получения состояния с мастера: %v", err)
+		Error("Ошибка получения состояния с мастера: %v", err)
 		return
 	}
 
-	log.Printf("Получено состояние %d файлов с мастера", len(masterState.Data.Files))
+	Info("Получено состояние %d файлов с мастера", len(masterState.Data.Files))
 
 	changedFiles := 0
 	for _, fileInfo := range masterState.Data.Files {
 		changed, err := r.syncFile(fileInfo)
 		if err != nil {
-			log.Printf("❌ Ошибка синхронизации файла %s: %v", fileInfo.FileName, err)
+			Error("Ошибка синхронизации файла %s: %v", fileInfo.FileName, err)
 			continue
 		}
 		if changed {
 			changedFiles++
-			log.Printf("✓ Обновлён: %s (версия %d)", fileInfo.FileName, fileInfo.Version)
+			Debug("Обновлён: %s (версия %d)", fileInfo.FileName, fileInfo.Version)
 		}
 	}
 
@@ -2237,21 +2235,21 @@ func (r *ReplicaSync) sync() {
 	r.mu.Unlock()
 
 	elapsed := time.Since(startTime)
-	log.Printf("=== Синхронизация файлов завершена за %v: обновлено %d файлов ===", elapsed, changedFiles)
+	Info("=== Синхронизация файлов завершена за %v: обновлено %d файлов ===", elapsed, changedFiles)
 
 	// НОВЫЙ КОД: Проверка зон и их A записей
-	log.Println("=== Начинаем проверку зон и A записей ===")
+	Debug("=== Начинаем проверку зон и A записей ===")
 	if err := r.CheckAndFixZones(); err != nil {
-		log.Printf("❌ Ошибка при проверке зон: %v", err)
+		Error("Ошибка при проверке зон: %v", err)
 	} else {
-		log.Println("=== Проверка зон завершена ===")
+		Info("=== Проверка зон завершена ===")
 	}
 
 	if changedFiles > 0 {
 		if err := r.reloadBIND(); err != nil {
-			log.Printf("❌ Ошибка перезагрузки BIND: %v", err)
+			Error("Ошибка перезагрузки BIND: %v", err)
 		} else {
-			log.Println("✓ BIND перезапущен успешно")
+			Info("BIND перезапущен успешно")
 		}
 	}
 }
@@ -2317,7 +2315,7 @@ func (r *ReplicaSync) saveFileAlreadyTransformed(filePath, content string) error
 }
 
 func (r *ReplicaSync) syncConfigFile(fileInfo SyncFileInfo, localPath string) (bool, error) {
-	log.Printf("📥 Проверка конфига %s", fileInfo.FileName)
+	Debug("Проверка конфига %s", fileInfo.FileName)
 
 	// 1. Скачиваем контент с мастера
 	fileContent, err := r.downloadFile(fileInfo)
@@ -2338,11 +2336,11 @@ func (r *ReplicaSync) syncConfigFile(fileInfo SyncFileInfo, localPath string) (b
 
 	// 5. Сравниваем checksum трансформированного контента с локальным
 	if fileExists && localChecksum == transformedChecksumHex {
-		log.Printf("✓ Конфиг %s не изменился (после трансформации)", fileInfo.FileName)
+		Debug("Конфиг %s не изменился (после трансформации)", fileInfo.FileName)
 		return false, nil
 	}
 
-	log.Printf("📝 Конфиг %s изменился, записываем...", fileInfo.FileName)
+	Debug("Конфиг %s изменился, записываем...", fileInfo.FileName)
 
 	// 6. Записываем только если отличается
 	if err := r.saveFileAlreadyTransformed(localPath, transformedContent); err != nil {
@@ -2355,7 +2353,7 @@ func (r *ReplicaSync) syncConfigFile(fileInfo SyncFileInfo, localPath string) (b
 func (r *ReplicaSync) syncFile(fileInfo SyncFileInfo) (bool, error) {
 	// Пропускаем zone_file — реплика получает зоны через BIND AXFR, не через API
 	if fileInfo.FileType == "zone_file" {
-		log.Printf("⏭️ Пропускаем зону %s (BIND zone transfer)", fileInfo.ZoneName)
+		Debug("Пропускаем зону %s (BIND zone transfer)", fileInfo.ZoneName)
 		return false, nil
 	}
 
@@ -2370,11 +2368,11 @@ func (r *ReplicaSync) syncFile(fileInfo SyncFileInfo) (bool, error) {
 	fileExists := (err == nil && localChecksum != "")
 
 	if fileExists && localChecksum == fileInfo.Checksum {
-		log.Printf("✓ Файл %s не изменился", fileInfo.FileName)
+		Debug("Файл %s не изменился", fileInfo.FileName)
 		return false, nil
 	}
 
-	log.Printf("📥 Файл %s изменился", fileInfo.FileName)
+	Debug("Файл %s изменился", fileInfo.FileName)
 
 	fileContent, err := r.downloadFile(fileInfo)
 	if err != nil {
@@ -2501,7 +2499,7 @@ func (r *ReplicaSync) saveFile(filePath, content string, fileInfo SyncFileInfo) 
 }
 
 func (r *ReplicaSync) transformConfig(content string, fileInfo SyncFileInfo) string {
-	log.Printf("Применение трансформаций к %s", fileInfo.FileName)
+	Debug("Применение трансформаций к %s", fileInfo.FileName)
 
 	// 1. Трансформация блока options
 	content = r.transformOptionsBlock(content)
@@ -2520,8 +2518,7 @@ func (r *ReplicaSync) transformConfig(content string, fileInfo SyncFileInfo) str
 	// 5. Чистка лишних пустых строк
 	content = regexp.MustCompile(`\n{3,}`).ReplaceAllString(content, "\n\n")
 
-	log.Printf("Трансформации применены к %s", fileInfo.FileName)
-	//log.Printf("Content: \n%s", content)
+	Debug("Трансформации применены к %s", fileInfo.FileName)
 	return content
 }
 
@@ -2575,7 +2572,7 @@ func (r *ReplicaSync) transformZoneBody(body string) string {
 	// 2. Пропускаем специальные типы зон (forward, hint, stub, delegate)
 	// Их не нужно трансформировать в slave
 	if originalType == "forward" || originalType == "hint" || originalType == "stub" || originalType == "delegate" {
-		log.Printf("⏭️ Пропускаем трансформацию зоны типа '%s'", originalType)
+		Debug("Пропускаем трансформацию зоны типа '%s'", originalType)
 		return body
 	}
 
@@ -2717,7 +2714,7 @@ func APIKeyAuth(requiredPerm string) gin.HandlerFunc {
 		if key.IPAddress != "" {
 			clientIP := c.ClientIP()
 			if !IsIPInSubnet(clientIP, key.IPAddress) {
-				log.Printf("[WARNING] Доступ с IP %s запрещён подсетью %s", clientIP, key.IPAddress)
+				Warn("Доступ с IP %s запрещён подсетью %s", clientIP, key.IPAddress)
 				c.JSON(http.StatusForbidden, gin.H{
 					"success": false,
 					"message": "Доступ запрещён",
@@ -2748,7 +2745,7 @@ func StartNamedConfWatcher() {
 		return
 	}
 
-	log.Println("🔄 Запуск мониторинга изменений /etc/named.conf (интервал: 30 сек)")
+	Info("Запуск мониторинга изменений /etc/named.conf (интервал: 30 сек)")
 
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
@@ -2772,14 +2769,14 @@ func syncNamedConf() {
 
 	// Проверяем существование файла
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		log.Printf("⚠️  Файл %s не существует, пропускаем синхронизацию", filePath)
+		Warn("Файл %s не существует, пропускаем синхронизацию", filePath)
 		return
 	}
 
 	// Вычисляем текущий checksum
 	currentChecksum, err := calculateChecksum(filePath)
 	if err != nil {
-		log.Printf("❌ Ошибка вычисления checksum для %s: %v", filePath, err)
+		Error("Ошибка вычисления checksum для %s: %v", filePath, err)
 		return
 	}
 
@@ -2790,11 +2787,11 @@ func syncNamedConf() {
 		First(&lastState).Error; err != nil {
 		// Если записей нет - сохраняем первую версию
 		if err == gorm.ErrRecordNotFound {
-			log.Printf("📝 Первая версия %s, сохраняем в БД", filePath)
+			Info("Первая версия %s, сохраняем в БД", filePath)
 			saveNamedConfVersion(filePath, currentChecksum)
 			return
 		}
-		log.Printf("❌ Ошибка получения последней версии: %v", err)
+		Error("Ошибка получения последней версии: %v", err)
 		return
 	}
 
@@ -2805,15 +2802,15 @@ func syncNamedConf() {
 	}
 
 	// Изменения есть - сохраняем новую версию
-	log.Printf("📝 Обнаружены изменения в %s, сохраняем версию %d", filePath, lastState.Version+1)
+	Info("📝 Обнаружены изменения в %s, сохраняем версию %d", filePath, lastState.Version+1)
 	saveNamedConfVersion(filePath, currentChecksum)
 }
 
 // saveNamedConfVersion сохраняет версию named.conf в БД
 func saveNamedConfVersion(filePath, checksum string) {
-	content, err := ioutil.ReadFile(filePath)
+	content, err := os.ReadFile(filePath)
 	if err != nil {
-		log.Printf("❌ Ошибка чтения файла %s: %v", filePath, err)
+		Error("Ошибка чтения файла %s: %v", filePath, err)
 		return
 	}
 
@@ -2837,11 +2834,11 @@ func saveNamedConfVersion(filePath, checksum string) {
 	}
 
 	if err := Db.Create(&state).Error; err != nil {
-		log.Printf("❌ Ошибка сохранения версии в БД: %v", err)
+		Error("Ошибка сохранения версии в БД: %v", err)
 		return
 	}
 
-	log.Printf(" Сохранена версия %d для %s (checksum: %s...)", newVersion, filePath, checksum[:16])
+	Info(" Сохранена версия %d для %s (checksum: %s...)", newVersion, filePath, checksum[:16])
 }
 
 // CheckARecordResolve проверяет, резолвится ли A запись через DNS реплики
@@ -2864,30 +2861,30 @@ func (r *ReplicaSync) CheckARecordResolve(zoneName, recordName, recordValue stri
 		replicaIP = "127.0.0.1"
 	}
 
-	log.Printf("Проверка резолвинга %s через реплику %s, ожидается %s", fqdn, replicaIP, recordValue)
+	Debug("Проверка резолвинга %s через реплику %s, ожидается %s", fqdn, replicaIP, recordValue)
 
 	// Выполняем nslookup: запрашиваем A-запись (тип 1) у указанного DNS-сервера [citation:5]
 	cmd := exec.Command("nslookup", "-type=A", fqdn, replicaIP)
 	output, err := cmd.CombinedOutput()
 
 	if err != nil {
-		log.Printf("Ошибка при выполнении nslookup для %s: %v", fqdn, err)
+		Error("Ошибка при выполнении nslookup для %s: %v", fqdn, err)
 		return false
 	}
 
 	// Парсим вывод для извлечения IP-адреса
 	resolvedIP := parseNslookupForIP(string(output))
 	if resolvedIP == "" {
-		log.Printf("Не удалось извлечь IP-адрес из вывода nslookup для %s", fqdn)
+		Warn("Не удалось извлечь IP-адрес из вывода nslookup для %s", fqdn)
 		return false
 	}
 
 	if resolvedIP == recordValue {
-		log.Printf("✓ Запись %s успешно резолвится в %s", fqdn, resolvedIP)
+		Info("Запись %s успешно резолвится в %s", fqdn, resolvedIP)
 		return true
 	}
 
-	log.Printf("✗ Запись %s не резолвится (ожидалось %s, получено %s)", fqdn, recordValue, resolvedIP)
+	Warn("Запись %s не резолвится (ожидалось %s, получено %s)", fqdn, recordValue, resolvedIP)
 	return false
 }
 
@@ -3011,13 +3008,13 @@ func (r *ReplicaSync) CheckAndFixZones() error {
 		return fmt.Errorf("ошибка получения списка зон: %v", err)
 	}
 
-	log.Printf("Проверка %d зон на реплике", len(zones))
+	Debug("Проверка %d зон на реплике", len(zones))
 
 	for _, zoneName := range zones {
 		// Получаем все A записи зоны с мастера
 		records, err := r.GetZoneARecordsFromMaster(zoneName)
 		if err != nil {
-			log.Printf("Ошибка получения A записей для зоны %s: %v", zoneName, err)
+			Error("Ошибка получения A записей для зоны %s: %v", zoneName, err)
 			continue
 		}
 
@@ -3036,7 +3033,7 @@ func (r *ReplicaSync) CheckAndFixZones() error {
 
 		// Если хотя бы одна запись не резолвится - делаем retransfer
 		if needRetransfer {
-			log.Printf("Обнаружены проблемы с резолвингом зоны %s, выполняем retransfer", zoneName)
+			Info("Обнаружены проблемы с резолвингом зоны %s, выполняем retransfer", zoneName)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
@@ -3049,11 +3046,11 @@ func (r *ReplicaSync) CheckAndFixZones() error {
 			}
 
 			if err != nil {
-				log.Printf("Ошибка retransfer для зоны %s: %v, output: %s", zoneName, err, string(output))
+				Error("Ошибка retransfer для зоны %s: %v, output: %s", zoneName, err, string(output))
 				continue
 			}
 
-			log.Printf("Retransfer для зоны %s выполнен успешно", zoneName)
+			Info("Retransfer для зоны %s выполнен успешно", zoneName)
 
 			// После retransfer делаем паузу и проверяем снова
 			time.Sleep(2 * time.Second)
@@ -3063,14 +3060,14 @@ func (r *ReplicaSync) CheckAndFixZones() error {
 			for _, record := range records {
 				if !r.CheckARecordResolve(zoneName, record.Name, record.Value) {
 					allResolved = false
-					log.Printf("После retransfer запись %s.%s всё ещё не резолвится", record.Name, zoneName)
+					Warn("После retransfer запись %s.%s всё ещё не резолвится", record.Name, zoneName)
 				}
 			}
 
 			if allResolved {
-				log.Printf("✓ Зона %s полностью синхронизирована", zoneName)
+				Info("Зона %s полностью синхронизирована", zoneName)
 			} else {
-				log.Printf("⚠ После retransfer зона %s всё ещё имеет проблемы", zoneName)
+				Warn("После retransfer зона %s всё ещё имеет проблемы", zoneName)
 			}
 		}
 	}
@@ -3154,7 +3151,7 @@ func InitQueueConfig() {
 	BatchJobs = make([]*Job, 0, BatchSize)
 	CurrentMode = "normal"
 
-	log.Printf("Очередь инициализирована: MaxSize=%d, BatchSize=%d, BatchInterval=%v, ThresholdLow=%.0f%%, ThresholdHigh=%.0f%%",
+	Info("Очередь инициализирована: MaxSize=%d, BatchSize=%d, BatchInterval=%v, ThresholdLow=%.0f%%, ThresholdHigh=%.0f%%",
 		MaxQueueSize, BatchSize, BatchInterval, QueueThresholdLow*100, QueueThresholdHigh*100)
 }
 
@@ -3164,12 +3161,12 @@ func CleanupOrphanSyncStates() {
 		return
 	}
 
-	log.Println("🧹 Мастер: проверка sync_states на наличие удаленных зон...")
+	Info("🧹 Мастер: проверка sync_states на наличие удаленных зон...")
 
 	// Получаем актуальные зоны из конфига мастера
 	currentZones, err := parseZoneConfig()
 	if err != nil {
-		log.Printf("❌ Ошибка получения текущих зон: %v", err)
+		Error("Ошибка получения текущих зон: %v", err)
 		return
 	}
 
@@ -3188,7 +3185,7 @@ func CleanupOrphanSyncStates() {
 		Pluck("zone_name", &dbZones).Error
 
 	if err != nil {
-		log.Printf("❌ Ошибка получения зон из БД: %v", err)
+		Error("Ошибка получения зон из БД: %v", err)
 		return
 	}
 
@@ -3200,9 +3197,9 @@ func CleanupOrphanSyncStates() {
 				Delete(&SyncState{})
 
 			if result.Error != nil {
-				log.Printf("⚠️ Ошибка удаления зоны %s из sync_states: %v", zoneName, result.Error)
+				Error("Ошибка удаления зоны %s из sync_states: %v", zoneName, result.Error)
 			} else if result.RowsAffected > 0 {
-				log.Printf("🗑️ Удалена зона %s из sync_states (удалено %d записей)",
+				Info("Удалена зона %s из sync_states (удалено %d записей)",
 					zoneName, result.RowsAffected)
 				deletedCount++
 			}
@@ -3210,9 +3207,9 @@ func CleanupOrphanSyncStates() {
 	}
 
 	if deletedCount > 0 {
-		log.Printf(" Очистка SyncStates завершена. Удалено зон: %d", deletedCount)
+		Info(" Очистка SyncStates завершена. Удалено зон: %d", deletedCount)
 	} else {
-		log.Printf(" Очистка SyncStates завершена. Удаленных зон не найдено")
+		Info(" Очистка SyncStates завершена. Удаленных зон не найдено")
 	}
 }
 
@@ -3230,7 +3227,7 @@ func StartSyncStateCleaner() {
 		}
 	}
 
-	log.Printf("🧹 Запуск очистки SyncStates на мастере (интервал: %v)", interval)
+	Info("Запуск очистки SyncStates на мастере (интервал: %v)", interval)
 
 	go func() {
 		// Первая очистка через 1 минуту после старта

@@ -2,7 +2,6 @@ package internal
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +17,7 @@ func InitAsyncBuffer() {
 		// Если не задан, используем директорию с бинарным файлом
 		execPath, err := os.Executable()
 		if err != nil {
-			log.Printf("WARNING: Не удалось получить путь к исполняемому файлу: %v", err)
+			Error("Не удалось получить путь к исполняемому файлу: %v", err)
 			execPath = "."
 		}
 		execDir := filepath.Dir(execPath)
@@ -28,7 +27,7 @@ func InitAsyncBuffer() {
 	// Создаем директорию для WAL если её нет
 	walDir := filepath.Dir(walPath)
 	if err := os.MkdirAll(walDir, 0755); err != nil {
-		log.Printf("WARNING: Не удалось создать директорию для WAL %s: %v", walDir, err)
+		Error("Не удалось создать директорию для WAL %s: %v", walDir, err)
 		// Fallback к временной директории
 		walPath = filepath.Join(os.TempDir(), "bind-api-wal.log")
 		os.MkdirAll(filepath.Dir(walPath), 0755)
@@ -36,11 +35,11 @@ func InitAsyncBuffer() {
 
 	walFile, err := os.OpenFile(walPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		log.Printf("WARNING: Не удалось создать WAL файл %s: %v", walPath, err)
+		Error("Не удалось создать WAL файл %s: %v", walPath, err)
 		// Продолжаем без WAL (асинхронная запись без гарантий)
 		walFile = nil
 	} else {
-		log.Printf("WAL файл: %s", walPath)
+		Debug("WAL файл: %s", walPath)
 	}
 
 	RecordBuffer = &AsyncRecordBuffer{
@@ -58,7 +57,7 @@ func InitAsyncBuffer() {
 	}
 
 	go RecordBuffer.worker()
-	log.Printf("Асинхронный буфер инициализирован: batchSize=%d, interval=%v, wal=%s",
+	Info("Асинхронный буфер инициализирован: batchSize=%d, interval=%v, wal=%s",
 		BatchSize, BatchInterval, walPath)
 }
 
@@ -75,7 +74,7 @@ func (b *AsyncRecordBuffer) recoverFromWAL() {
 	// Читаем WAL файл (используем os.ReadFile вместо ioutil.ReadFile)
 	content, err := os.ReadFile(b.walPath)
 	if err != nil {
-		log.Printf("WARNING: Не удалось прочитать WAL файл %s: %v", b.walPath, err)
+		Error("Не удалось прочитать WAL файл %s: %v", b.walPath, err)
 		return
 	}
 
@@ -101,14 +100,14 @@ func (b *AsyncRecordBuffer) recoverFromWAL() {
 	// Переоткрываем файл для записи
 	walFile, err := os.OpenFile(b.walPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		log.Printf("WARNING: Не удалось переоткрыть WAL файл: %v", err)
+		Error("Не удалось переоткрыть WAL файл: %v", err)
 		b.walFile = nil
 	} else {
 		b.walFile = walFile
 	}
 
 	if recoveredCount > 0 {
-		log.Printf("🔄 Восстановлено %d записей из WAL", recoveredCount)
+		Info("Восстановлено %d записей из WAL", recoveredCount)
 		go b.flush()
 	}
 }
@@ -119,7 +118,7 @@ func (b *AsyncRecordBuffer) Add(zoneName, recordLine string) {
 	if b.walFile != nil {
 		walEntry := fmt.Sprintf("%s|%s\n", zoneName, recordLine)
 		if _, err := b.walFile.WriteString(walEntry); err != nil {
-			log.Printf("WARNING: Ошибка записи в WAL: %v", err)
+			Error("Ошибка записи в WAL: %v", err)
 		}
 	}
 
@@ -172,20 +171,20 @@ func (b *AsyncRecordBuffer) writeToZone(zoneName string, records []string) {
 		for _, record := range records {
 			errAppend := appendRecordToFile(zone.File, record)
 			if errAppend != nil {
-				log.Printf("async buffer append record error: %s, %v, %v", zoneName, records, errAppend)
+				Error("async buffer append record error: %s, %v, %v", zoneName, records, errAppend)
 			}
 		}
 		errSerial := incrementSerial(zone.File)
 		if errSerial != nil {
-			log.Printf("async buffer increment serial error: %s, %v, %v", zoneName, records, errSerial)
+			Error("async buffer increment serial error: %s, %v, %v", zoneName, records, errSerial)
 		}
 		return nil
 	})
 	if err != nil {
-		log.Printf("async buffer record error: %s, %v, %v", zoneName, records, err)
+		Error("async buffer record error: %s, %v, %v", zoneName, records, err)
 	}
 
 	errPermissions := fixPermissions(zone.File)
-	log.Printf("async buffer error permissions error: %s, %v, %v", zoneName, records, errPermissions)
+	Error("async buffer error permissions error: %s, %v, %v", zoneName, records, errPermissions)
 	PendingReload = true
 }

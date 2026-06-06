@@ -37,6 +37,7 @@ func main() {
 	}
 
 	app.InitConfig()
+	app.InitLogLevel()
 	app.InitQueueConfig()
 
 	// Определяем роль

@@ -47,16 +47,16 @@ func sendResponse(c *gin.Context, status int, success bool, message string, data
 }
 
 func reloadBind() error {
-	log.Println("Выполнение rndc reload...")
+	Debug("Выполнение rndc reload...")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "rndc", "reload")
 	out, err := cmd.CombinedOutput()
-	log.Printf("rndc reload output: %s, error: %v", string(out), err)
 	if err != nil {
+		Error("rndc reload output: %s, error: %v", string(out), err)
 		return fmt.Errorf("rndc reload failed: %v, output: %s", err, string(out))
 	}
-	log.Println("rndc reload выполнен успешно")
+	Info("rndc reload выполнен успешно")
 	return nil
 }
 
@@ -65,7 +65,7 @@ func fixPermissions(filename string) error {
 	filename = filepath.Clean(filename)
 	if !strings.HasPrefix(filename, "/var/named/") &&
 		!strings.HasPrefix(filename, "/etc/named") {
-		log.Printf("WARNING: fixPermissions отклонён для подозрительного пути: %s", filename)
+		Warn("fixPermissions отклонён для подозрительного пути: %s", filename)
 		return fmt.Errorf("недопустимый путь файла")
 	}
 
@@ -75,7 +75,7 @@ func fixPermissions(filename string) error {
 
 	cmd := exec.CommandContext(ctx, "chown", "named:named", filename)
 	if err := cmd.Run(); err != nil {
-		log.Printf("WARNING: chown failed for %s: %v", filename, err)
+		Error("chown failed for %s: %v", filename, err)
 	}
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
@@ -83,7 +83,7 @@ func fixPermissions(filename string) error {
 
 	cmd = exec.CommandContext(ctx2, "chmod", "644", filename)
 	if err := cmd.Run(); err != nil {
-		log.Printf("WARNING: chmod failed for %s: %v", filename, err)
+		Error("chmod failed for %s: %v", filename, err)
 	}
 
 	ctx3, cancel3 := context.WithTimeout(context.Background(), 10*time.Second)
@@ -407,7 +407,7 @@ func validateFilePath(filePath, allowedDir string) bool {
 }
 
 func incrementSerial(zoneFile string) error {
-	log.Printf("Увеличение Serial в файле: %s", zoneFile)
+	Debug("Увеличение Serial в файле: %s", zoneFile)
 
 	if _, err := os.Stat(zoneFile); os.IsNotExist(err) {
 		return fmt.Errorf("файл зоны не существует: %s", zoneFile)
@@ -462,7 +462,7 @@ func incrementSerial(zoneFile string) error {
 	}
 
 	if !serialUpdated {
-		log.Println("WARNING: Serial не был увеличен (не найден в файле)")
+		Warn("Serial не был увеличен (не найден в файле)")
 	}
 
 	return os.WriteFile(zoneFile, []byte(strings.Join(newLines, "\n")), 0644)
@@ -527,7 +527,7 @@ func readZoneFileSimple(zoneFile string) ([]RecordInfo, error) {
 }
 
 func appendRecordToFile(zoneFile, recordLine string) error {
-	log.Printf("Добавление записи в файл %s: %s", zoneFile, recordLine)
+	Debug("Добавление записи в файл %s: %s", zoneFile, recordLine)
 	f, err := os.OpenFile(zoneFile, os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
@@ -590,7 +590,7 @@ func getServerIPs() []string {
 
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
-		log.Printf("WARNING: Не удалось получить IP адреса: %v", err)
+		Error("Не удалось получить IP адреса: %v", err)
 		return []string{"127.0.0.1"}
 	}
 
@@ -816,7 +816,7 @@ func WaitForBind(timeout time.Duration) error {
 
 	for {
 		if checkBindStatus() == "active" {
-			log.Printf("✓ BIND successfully started")
+			Info("BIND successfully started")
 			return nil
 		}
 
@@ -831,11 +831,11 @@ func WaitForBind(timeout time.Duration) error {
 // StartBindIfNotRunning запускает BIND если он не запущен
 func StartBindIfNotRunning() error {
 	if checkBindStatus() == "active" {
-		log.Println("BIND is already running")
+		Info("BIND is already running")
 		return nil
 	}
 
-	log.Println("Starting BIND...")
+	Info("Starting BIND...")
 
 	// Пробуем запустить через systemctl
 	cmd := exec.Command("systemctl", "start", "named")
@@ -888,7 +888,7 @@ func ValidateMasterURL(masterURL string) (string, error) {
 		}
 
 		builtURL := fmt.Sprintf("http://%s:%d", masterIP, portNum)
-		log.Printf("WARNING: MASTER_URL не задан, используется небезопасный адрес синхронизации, собранный из REPLICA_MASTER_IP: %s", builtURL)
+		Warn("MASTER_URL не задан, используется небезопасный адрес синхронизации, собранный из REPLICA_MASTER_IP: %s", builtURL)
 		return builtURL, nil
 	}
 
@@ -907,7 +907,7 @@ func ValidateMasterURL(masterURL string) (string, error) {
 		if !allowInsecureSync {
 			return "", fmt.Errorf("MASTER_URL с http запрещён: используйте https или установите ALLOW_INSECURE_SYNC=true")
 		}
-		log.Printf("[WARNING]: используется небезопасный MASTER_URL по HTTP, так как ALLOW_INSECURE_SYNC=true")
+		Warn("используется небезопасный MASTER_URL по HTTP, так как ALLOW_INSECURE_SYNC=true")
 	default:
 		return "", fmt.Errorf("неподдерживаемая схема MASTER_URL: %s", parsed.Scheme)
 	}
@@ -928,7 +928,7 @@ func IsIPInSubnet(ipStr, subnetStr string) bool {
 
 	_, subnet, err := net.ParseCIDR(subnetStr)
 	if err != nil {
-		log.Printf("[WARNING]: Неверный формат подсети %s: %v", subnetStr, err)
+		Error("Неверный формат подсети %s: %v", subnetStr, err)
 		return false
 	}
 
@@ -963,7 +963,7 @@ func IsIPBlocked(ip string) bool {
 	if blocked && time.Now().After(until) {
 		delete(SyncAuthLock.blockedIPs, ip)
 		delete(SyncAuthLock.failedAttempts, ip)
-		log.Printf("[INFO] IP %s разблокирован", ip)
+		Info("IP %s разблокирован", ip)
 	}
 
 	return false
@@ -1002,7 +1002,7 @@ func RecordFailedAttempt(ip string) {
 	// Блокируем после 5 неудачных попыток
 	if attempt.Count >= 5 {
 		SyncAuthLock.blockedIPs[ip] = now.Add(15 * time.Minute) // Блокировка на 15 минут
-		log.Printf("[WARNING] IP %s заблокирован на 15 минут после %d неудачных попыток", ip, attempt.Count)
+		Warn("IP %s заблокирован на 15 минут после %d неудачных попыток", ip, attempt.Count)
 	}
 }
 
@@ -1031,13 +1031,13 @@ func ClearOldAttempts() {
 	}
 
 	if cleared > 0 {
-		log.Printf("[INFO] Очищено %d старых попыток авторизации", cleared)
+		Info("Очищено %d старых попыток авторизации", cleared)
 	}
 }
 
 // StartAuthAttemptCleaner запускает фоновую задачу очистки попыток авторизации
 func StartAuthAttemptCleaner() {
-	log.Println("[INFO] Запуск очистки старых попыток авторизации (интервал: 5 мин)")
+	Info("Запуск очистки старых попыток авторизации (интервал: 5 мин)")
 
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute)

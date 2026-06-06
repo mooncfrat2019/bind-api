@@ -3,7 +3,6 @@ package internal
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -554,7 +553,7 @@ func HandleCreateAPIKey(c *gin.Context) {
 		CreatedAt:   apiKey.CreatedAt,
 	}
 
-	log.Printf("Создан API-ключ: ID=%d, Name=%s", apiKey.ID, apiKey.Name)
+	Debug("Создан API-ключ: ID=%d, Name=%s", apiKey.ID, apiKey.Name)
 
 	sendResponse(c, http.StatusCreated, true, "API-ключ создан", response)
 }

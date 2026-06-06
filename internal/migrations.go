@@ -1,9 +1,5 @@
 package internal
 
-import (
-	"log"
-)
-
 // MigrateExistingKeys мигрирует существующие ключи из plaintext в хеши
 // Вызывается один раз при обновлении системы
 func MigrateExistingKeys() error {
@@ -11,7 +7,7 @@ func MigrateExistingKeys() error {
 		return nil
 	}
 
-	log.Println("🔄 Проверка миграции API-ключей...")
+	Debug("Проверка миграции API-ключей...")
 
 	var keys []APIKey
 	if err := Db.Find(&keys).Error; err != nil {
@@ -29,7 +25,7 @@ func MigrateExistingKeys() error {
 				// Хешируем существующий ключ
 				keyHash, err := hashAPIKey(key.Key)
 				if err != nil {
-					log.Printf("⚠️ Ошибка хеширования ключа ID=%d: %v", key.ID, err)
+					Error("Ошибка хеширования ключа ID=%d: %v", key.ID, err)
 					continue
 				}
 
@@ -37,12 +33,12 @@ func MigrateExistingKeys() error {
 				key.KeyPrefix = generateKeyPrefix(key.Key)
 
 				if err := Db.Save(&key).Error; err != nil {
-					log.Printf("⚠️ Ошибка сохранения ключа ID=%d: %v", key.ID, err)
+					Error("Ошибка сохранения ключа ID=%d: %v", key.ID, err)
 					continue
 				}
 
 				migrated++
-				log.Printf("✓ Мигрирован ключ ID=%d, Name=%s", key.ID, key.Name)
+				Debug("Мигрирован ключ ID=%d, Name=%s", key.ID, key.Name)
 			} else {
 				// Ключа нет вообще - пропускаем
 				skipped++
@@ -54,9 +50,9 @@ func MigrateExistingKeys() error {
 	}
 
 	if migrated > 0 {
-		log.Printf("Миграция завершена: обновлено %d ключей, пропущено %d", migrated, skipped)
+		Info("Миграция завершена: обновлено %d ключей, пропущено %d", migrated, skipped)
 	} else {
-		log.Printf("Миграция не требуется: все %d ключей уже хешированы", len(keys))
+		Info("Миграция не требуется: все %d ключей уже хешированы", len(keys))
 	}
 
 	return nil
