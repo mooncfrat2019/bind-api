@@ -3181,7 +3181,7 @@ func CleanupOrphanSyncStates() {
 
 	// Получаем все зоны из БД мастера
 	var dbZones []string
-	err = Db.Table("sync_states").
+	err = Db.Model(&SyncState{}).
 		Where("file_type = ?", "zone_file").
 		Where("zone_name IS NOT NULL AND zone_name != ''").
 		Distinct("zone_name").
