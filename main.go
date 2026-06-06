@@ -33,7 +33,7 @@ func loggerMiddleware() gin.HandlerFunc {
 func main() {
 	// Загрузка .env
 	if err := godotenv.Load(); err != nil {
-		log.Println("WARNING: .env файл не найден")
+		app.Error(".env файл не найден")
 	}
 
 	app.InitConfig()
@@ -45,34 +45,34 @@ func main() {
 	if app.AppRole == "" {
 		app.AppRole = "master"
 	}
-	log.Printf("=== РОЛЬ СЕРВЕРА: %s ===", strings.ToUpper(app.AppRole))
+	app.Info("=== РОЛЬ СЕРВЕРА: %s ===", strings.ToUpper(app.AppRole))
 
 	// Инициализация БД (только MASTER)
 	if err := app.InitDatabase(); err != nil {
-		log.Fatalf("Ошибка инициализации БД: %v", err)
+		app.Error("Ошибка инициализации БД: %v", err)
 	}
 
 	var validatedMasterURL string
 	// Инициализация обработчика синхронизации (только MASTER)
 	if app.AppRole == "master" {
 		app.SH = app.NewSH(app.Db)
-		log.Println("✓ Синхронизация MASTER инициализирована")
+		app.Info("Синхронизация MASTER инициализирована")
 
 		app.InitJobQueue()
-		log.Println("✓ Очередь заданий инициализирована")
+		app.Info("Очередь заданий инициализирована")
 
 		app.InitAsyncBuffer()
-		log.Println("✓ Асинхронный буфер записи инициализирован")
+		app.Info("Асинхронный буфер записи инициализирован")
 
 		app.StartSyncStateCleaner()
-		log.Println("✓ Подпроцесс проверки и очистки зон запущен")
+		app.Info("Подпроцесс проверки и очистки зон запущен")
 
 		// Запуск мониторинга named.conf
 		app.StartNamedConfWatcher()
 
 		// Запуск очистки попыток авторизации
 		app.StartAuthAttemptCleaner()
-		log.Println("✓ Очистка попыток авторизации запущена")
+		app.Info("Очистка попыток авторизации запущена")
 	}
 
 	// Инициализация клиента синхронизации (только REPLICA)
@@ -87,21 +87,21 @@ func main() {
 		var err error
 		validatedMasterURL, err = app.ValidateMasterURL(masterURL)
 		if err != nil {
-			log.Fatalf("ERROR: %v", err)
+			app.Error("ERROR: %v", err)
 		}
 
 		app.RS = app.NewReplicaSync(validatedMasterURL, apiToken, syncInterval, true)
 		app.RS.Start()
-		log.Println("✓ Синхронизация REPLICA запущена")
+		app.Info("Синхронизация REPLICA запущена")
 	}
 
 	// Проверка BIND
 	if _, err := exec.LookPath("rndc"); err != nil {
-		log.Fatal("Утилита rndc не найдена в PATH")
+		app.Error("Утилита rndc не найдена в PATH")
 	}
 
 	if _, err := os.Stat(app.ZoneDir); os.IsNotExist(err) {
-		log.Fatalf("Директория зон не существует: %s", app.ZoneDir)
+		app.Error("Директория зон не существует: %s", app.ZoneDir)
 	}
 
 	app.InitMetrics()
@@ -177,13 +177,13 @@ func main() {
 		port = ":8080"
 	}
 
-	log.Printf("BIND Manager API запущен на порту %s", port)
-	log.Printf("Режим: %s", app.AppRole)
+	app.Info("BIND Manager API запущен на порту %s", port)
+	app.Info("Режим: %s", app.AppRole)
 
 	if app.AppRole == "master" {
-		log.Printf("База данных: %s@%s:%s/%s", app.DbUser, app.DbHost, app.DbPort, app.DbName)
+		app.Debug("База данных: %s@%s:%s/%s", app.DbUser, app.DbHost, app.DbPort, app.DbName)
 	} else {
-		log.Printf("MASTER URL: %s", os.Getenv("MASTER_URL"))
+		app.Debug("MASTER URL: %s", os.Getenv("MASTER_URL"))
 	}
 
 	if err := r.Run(port); err != nil {
