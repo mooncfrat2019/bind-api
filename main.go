@@ -68,6 +68,10 @@ func main() {
 
 		// Запуск мониторинга named.conf
 		app.StartNamedConfWatcher()
+
+		// Запуск очистки попыток авторизации
+		app.StartAuthAttemptCleaner()
+		log.Println("✓ Очистка попыток авторизации запущена")
 	}
 
 	// Инициализация клиента синхронизации (только REPLICA)

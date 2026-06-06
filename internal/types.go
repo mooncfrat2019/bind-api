@@ -276,3 +276,22 @@ func (k *APIKey) BeforeCreate(tx *gorm.DB) error {
 	}
 	return nil
 }
+
+// FailedAuthAttempt попытка неудачной авторизации
+type FailedAuthAttempt struct {
+	IP        string
+	Timestamp time.Time
+	Count     int
+}
+
+// AuthLock для блокировок
+type AuthLock struct {
+	mu             sync.RWMutex
+	failedAttempts map[string]*FailedAuthAttempt // IP -> попытка
+	blockedIPs     map[string]time.Time          // IP -> время разблокировки
+}
+
+var SyncAuthLock = &AuthLock{
+	failedAttempts: make(map[string]*FailedAuthAttempt),
+	blockedIPs:     make(map[string]time.Time),
+}

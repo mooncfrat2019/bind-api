@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -1609,14 +1610,42 @@ func NewSH(db *gorm.DB) *SyncHandler {
 
 func (h *SyncHandler) SyncAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		log.Println("SyncAuthMiddleware run")
+		clientIP := c.ClientIP()
+
+		// Проверяем не заблокирован ли IP
+		if IsIPBlocked(clientIP) {
+			log.Printf("⚠️ Запрос с заблокированного IP: %s", clientIP)
+			c.JSON(http.StatusForbidden, gin.H{
+				"success": false,
+				"message": "IP адрес временно заблокирован",
+			})
+			c.Abort()
+			return
+		}
+
 		token := c.GetHeader("X-Sync-Token")
 		expectedToken := os.Getenv("SYNC_API_TOKEN")
+		expectedSubnet := os.Getenv("SYNC_API_SUBNET")
 
-		if token == "" || token != expectedToken {
+		// Проверяем токен с защитой от timing attack
+		if token == "" || expectedToken == "" ||
+			subtle.ConstantTimeCompare([]byte(token), []byte(expectedToken)) != 1 {
+			log.Printf("[WARNING] Неверный токен синхронизации с IP: %s", clientIP)
+			RecordFailedAttempt(clientIP) // ← Записываем попытку
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"success": false,
 				"message": "Неверный токен синхронизации",
+			})
+			c.Abort()
+			return
+		}
+
+		// Проверяем подсеть (если указана)
+		if expectedSubnet != "" && !IsIPInSubnet(clientIP, expectedSubnet) {
+			log.Printf("[WARNING] Токен действителен, но IP %s вне разрешённой подсети %s", clientIP, expectedSubnet)
+			c.JSON(http.StatusForbidden, gin.H{
+				"success": false,
+				"message": "Доступ запрещён с этого IP адреса",
 			})
 			c.Abort()
 			return
@@ -2679,7 +2708,7 @@ func APIKeyAuth(requiredPerm string) gin.HandlerFunc {
 		if requiredPerm != "" && !key.HasPermission(requiredPerm) {
 			c.JSON(http.StatusForbidden, gin.H{
 				"success": false,
-				"message": "Недостаточно прав: требуется " + requiredPerm,
+				"message": "Недостаточно прав",
 			})
 			c.Abort()
 			return
@@ -2687,10 +2716,11 @@ func APIKeyAuth(requiredPerm string) gin.HandlerFunc {
 
 		if key.IPAddress != "" {
 			clientIP := c.ClientIP()
-			if clientIP != key.IPAddress {
+			if !IsIPInSubnet(clientIP, key.IPAddress) {
+				log.Printf("[WARNING] Доступ с IP %s запрещён подсетью %s", clientIP, key.IPAddress)
 				c.JSON(http.StatusForbidden, gin.H{
 					"success": false,
-					"message": "Доступ запрещён с этого IP-адреса",
+					"message": "Доступ запрещён",
 				})
 				c.Abort()
 				return

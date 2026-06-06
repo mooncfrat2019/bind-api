@@ -907,10 +907,148 @@ func ValidateMasterURL(masterURL string) (string, error) {
 		if !allowInsecureSync {
 			return "", fmt.Errorf("MASTER_URL с http запрещён: используйте https или установите ALLOW_INSECURE_SYNC=true")
 		}
-		log.Printf("WARNING: используется небезопасный MASTER_URL по HTTP, так как ALLOW_INSECURE_SYNC=true")
+		log.Printf("[WARNING]: используется небезопасный MASTER_URL по HTTP, так как ALLOW_INSECURE_SYNC=true")
 	default:
 		return "", fmt.Errorf("неподдерживаемая схема MASTER_URL: %s", parsed.Scheme)
 	}
 
 	return strings.TrimRight(parsed.String(), "/"), nil
+}
+
+// IsIPInSubnet проверяет, находится ли IP в указанной подсети
+func IsIPInSubnet(ipStr, subnetStr string) bool {
+	if subnetStr == "" {
+		return true // Если подсеть не указана, разрешаем все IP
+	}
+
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+
+	_, subnet, err := net.ParseCIDR(subnetStr)
+	if err != nil {
+		log.Printf("[WARNING]: Неверный формат подсети %s: %v", subnetStr, err)
+		return false
+	}
+
+	return subnet.Contains(ip)
+}
+
+// IsIPBlocked проверяет заблокирован ли IP
+func IsIPBlocked(ip string) bool {
+	SyncAuthLock.mu.RLock()
+	until, blocked := SyncAuthLock.blockedIPs[ip]
+
+	if !blocked {
+		SyncAuthLock.mu.RUnlock()
+		return false
+	}
+
+	// Если заблокирован, проверяем время
+	if time.Now().Before(until) {
+		SyncAuthLock.mu.RUnlock()
+		return true
+	}
+
+	// Время блокировки истекло - нужно удалить
+	SyncAuthLock.mu.RUnlock()
+
+	// Переключаемся на write lock для удаления
+	SyncAuthLock.mu.Lock()
+	defer SyncAuthLock.mu.Unlock()
+
+	// Проверяем ещё раз (могли удалить пока мы переключались)
+	until, blocked = SyncAuthLock.blockedIPs[ip]
+	if blocked && time.Now().After(until) {
+		delete(SyncAuthLock.blockedIPs, ip)
+		delete(SyncAuthLock.failedAttempts, ip)
+		log.Printf("[INFO] IP %s разблокирован", ip)
+	}
+
+	return false
+}
+
+// RecordFailedAttempt записывает неудачную попытку авторизации
+func RecordFailedAttempt(ip string) {
+	SyncAuthLock.mu.Lock()
+	defer SyncAuthLock.mu.Unlock()
+
+	now := time.Now()
+
+	// Если уже заблокирован - не записываем
+	if _, blocked := SyncAuthLock.blockedIPs[ip]; blocked {
+		return
+	}
+
+	attempt, exists := SyncAuthLock.failedAttempts[ip]
+	if !exists {
+		attempt = &FailedAuthAttempt{
+			IP:        ip,
+			Timestamp: now,
+			Count:     1,
+		}
+		SyncAuthLock.failedAttempts[ip] = attempt
+	} else {
+		// Сбрасываем счётчик если прошло больше 5 минут
+		if now.Sub(attempt.Timestamp) > 5*time.Minute {
+			attempt.Count = 1
+			attempt.Timestamp = now
+		} else {
+			attempt.Count++
+		}
+	}
+
+	// Блокируем после 5 неудачных попыток
+	if attempt.Count >= 5 {
+		SyncAuthLock.blockedIPs[ip] = now.Add(15 * time.Minute) // Блокировка на 15 минут
+		log.Printf("[WARNING] IP %s заблокирован на 15 минут после %d неудачных попыток", ip, attempt.Count)
+	}
+}
+
+// ClearOldAttempts очищает старые попытки авторизации
+func ClearOldAttempts() {
+	SyncAuthLock.mu.Lock()
+	defer SyncAuthLock.mu.Unlock()
+
+	now := time.Now()
+	cleared := 0
+
+	for ip, attempt := range SyncAuthLock.failedAttempts {
+		if now.Sub(attempt.Timestamp) > 10*time.Minute {
+			delete(SyncAuthLock.failedAttempts, ip)
+			cleared++
+		}
+	}
+
+	// Также очищаем истёкшие блокировки
+	for ip, until := range SyncAuthLock.blockedIPs {
+		if now.After(until) {
+			delete(SyncAuthLock.blockedIPs, ip)
+			delete(SyncAuthLock.failedAttempts, ip)
+			cleared++
+		}
+	}
+
+	if cleared > 0 {
+		log.Printf("[INFO] Очищено %d старых попыток авторизации", cleared)
+	}
+}
+
+// StartAuthAttemptCleaner запускает фоновую задачу очистки попыток авторизации
+func StartAuthAttemptCleaner() {
+	log.Println("[INFO] Запуск очистки старых попыток авторизации (интервал: 5 мин)")
+
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+
+		// Первая очистка через 1 минуту после старта
+		time.Sleep(1 * time.Minute)
+		ClearOldAttempts()
+
+		for range ticker.C {
+			ClearOldAttempts()
+		}
+	}()
 }
