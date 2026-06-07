@@ -1052,3 +1052,75 @@ func StartAuthAttemptCleaner() {
 		}
 	}()
 }
+
+// validateTXTRecord проверяет TXT запись на потенциально опасные паттерны
+// Возвращает ошибку если найдены XSS/инъекционные паттерны
+func validateTXTRecord(value string) error {
+	if value == "" {
+		return fmt.Errorf("TXT запись не может быть пустой")
+	}
+
+	// Проверка на слишком длинную запись (DNS лимит ~255 символов на строку)
+	if len(value) > 255 {
+		return fmt.Errorf("TXT запись слишком длинная: максимум 255 символов")
+	}
+
+	// Опасные паттерны для XSS и инъекций
+	dangerousPatterns := []string{
+		// XSS паттерны
+		"<script", "</script", "<script ",
+		"javascript:", "vbscript:", "data:text/html",
+		"onerror=", "onclick=", "onload=", "onmouseover=",
+		"onfocus=", "onblur=", "onchange=", "onsubmit=",
+		"<iframe", "</iframe", "<object", "</object",
+		"<embed", "<svg", "<img src=",
+
+		// HTML-инъекции
+		"<body", "<html", "<head",
+		"<link", "<meta http-equiv",
+
+		// CSS инъекции
+		"expression(", "behavior:", "-moz-binding:",
+
+		// URL схемы для инъекций
+		"javascript%3a", "javascript%3A",
+		"data%3a", "data%3A",
+	}
+
+	valueLower := strings.ToLower(value)
+	for _, pattern := range dangerousPatterns {
+		if strings.Contains(valueLower, pattern) {
+			return fmt.Errorf("TXT запись содержит потенциально опасный паттерн: %s", pattern)
+		}
+	}
+
+	// Проверка на экранированные спецсимволы которые могут быть опасны
+	escapedPatterns := []string{
+		"\\x3c", // <
+		"\\x3e", // >
+		"\\u003c",
+		"\\u003e",
+		"%3c", "%3C", // URL-encoded <
+		"%3e", "%3E", // URL-encoded >
+	}
+
+	for _, pattern := range escapedPatterns {
+		if strings.Contains(valueLower, strings.ToLower(pattern)) {
+			return fmt.Errorf("TXT запись содержит подозрительное экранирование: %s", pattern)
+		}
+	}
+
+	return nil
+}
+
+// sanitizeTXTRecord очищает TXT запись от потенциально опасных символов
+// Используется как дополнительная защита после валидации
+func sanitizeTXTRecord(value string) string {
+	// Удаляем нулевые байты (могут использоваться для обхода фильтров)
+	value = strings.ReplaceAll(value, "\x00", "")
+
+	// Нормализуем пробельные символы
+	value = strings.TrimSpace(value)
+
+	return value
+}

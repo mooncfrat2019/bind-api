@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -181,4 +182,142 @@ func TestSendResponse(t *testing.T) {
 	assert.True(t, response.Success)
 	assert.Equal(t, "test message", response.Message)
 	assert.Equal(t, "value", response.Data.(map[string]interface{})["key"])
+}
+
+func TestValidateTXTRecord(t *testing.T) {
+	tests := []struct {
+		name      string
+		value     string
+		shouldErr bool
+		errMsg    string
+	}{
+		// Легитимные TXT записи
+		{
+			name:      "valid SPF record",
+			value:     "v=spf1 include:_spf.google.com ~all",
+			shouldErr: false,
+		},
+		{
+			name:      "valid DKIM record",
+			value:     "v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC",
+			shouldErr: false,
+		},
+		{
+			name:      "valid DMARC record",
+			value:     "v=DMARC1; p=reject; rua=mailto:dmarc@example.com",
+			shouldErr: false,
+		},
+		{
+			name:      "valid Google verification",
+			value:     "google-site-verification=abc123xyz",
+			shouldErr: false,
+		},
+		{
+			name:      "valid simple text",
+			value:     "This is a simple TXT record",
+			shouldErr: false,
+		},
+
+		// Опасные паттерны
+		{
+			name:      "xss script tag",
+			value:     "<script>alert('xss')</script>",
+			shouldErr: true,
+			errMsg:    "потенциально опасный паттерн",
+		},
+		{
+			name:      "xss javascript protocol",
+			value:     "javascript:alert(1)",
+			shouldErr: true,
+			errMsg:    "потенциально опасный паттерн",
+		},
+		{
+			name:      "xss onerror handler",
+			value:     "onerror=alert(1)",
+			shouldErr: true,
+			errMsg:    "потенциально опасный паттерн",
+		},
+		{
+			name:      "xss iframe tag",
+			value:     "<iframe src='evil.com'></iframe>",
+			shouldErr: true,
+			errMsg:    "потенциально опасный паттерн",
+		},
+		{
+			name:      "url encoded script",
+			value:     "%3cscript%3ealert(1)%3c/script%3e",
+			shouldErr: true,
+			errMsg:    "подозрительное экранирование",
+		},
+		{
+			name:      "hex encoded less than",
+			value:     "\\x3cscript\\x3e",
+			shouldErr: true,
+			errMsg:    "подозрительное экранирование",
+		},
+
+		// Граничные случаи
+		{
+			name:      "empty value",
+			value:     "",
+			shouldErr: true,
+			errMsg:    "не может быть пустой",
+		},
+		{
+			name:      "too long value",
+			value:     strings.Repeat("a", 256),
+			shouldErr: true,
+			errMsg:    "слишком длинная",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateTXTRecord(tt.value)
+			if tt.shouldErr {
+				assert.Error(t, err)
+				if tt.errMsg != "" {
+					assert.Contains(t, err.Error(), tt.errMsg)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestSanitizeTXTRecord(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "normal text",
+			input:    "v=spf1 include:_spf.google.com ~all",
+			expected: "v=spf1 include:_spf.google.com ~all",
+		},
+		{
+			name:     "with leading/trailing spaces",
+			input:    "  google-site-verification=abc123  ",
+			expected: "google-site-verification=abc123",
+		},
+		{
+			name:     "with null bytes",
+			input:    "test\x00value",
+			expected: "testvalue",
+		},
+		{
+			name:     "with multiple null bytes",
+			input:    "v=spf1\x00\x00include:_spf.google.com",
+			expected: "v=spf1include:_spf.google.com",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := sanitizeTXTRecord(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
 }

@@ -1287,9 +1287,19 @@ func executeAddRecord(job *Job) JobResult {
 		return JobResult{Success: false, Error: err}
 	}
 
-	// Валидация значения записи
-	if err = validateRecordValue(recordType, job.RecordValue); err != nil {
-		return JobResult{Success: false, Error: err}
+	if recordType == "TXT" {
+		// Санитизация перед валидацией
+		job.RecordValue = sanitizeTXTRecord(job.RecordValue)
+
+		// Валидация на опасные паттерны
+		if err = validateTXTRecord(job.RecordValue); err != nil {
+			return JobResult{Success: false, Error: err}
+		}
+	} else {
+		// Валидация для остальных типов записей
+		if err = validateRecordValue(recordType, job.RecordValue); err != nil {
+			return JobResult{Success: false, Error: err}
+		}
 	}
 
 	// Валидация TTL
