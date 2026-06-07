@@ -987,6 +987,7 @@ func executeCreateZone(job *Job) JobResult {
 	}()
 
 	if !validateZoneName(job.ZoneName) {
+		Error("недопустимое имя зоны: %s", job.ZoneName)
 		err = fmt.Errorf("недопустимое имя зоны")
 		return JobResult{Success: false, Error: err}
 	}
@@ -1002,6 +1003,7 @@ func executeCreateZone(job *Job) JobResult {
 	}
 
 	if zoneExistsInConfig(job.ZoneName) {
+		Error("зона уже существует %s", job.ZoneName)
 		err = fmt.Errorf("зона уже существует")
 		return JobResult{Success: false, Error: err}
 	}
@@ -1025,6 +1027,7 @@ func executeCreateZone(job *Job) JobResult {
 
 	zoneFile = filepath.Clean(zoneFile)
 	if !strings.HasPrefix(zoneFile, filepath.Clean(ZoneDir)) {
+		Error("путь файла зоны вне разрешённой директории %s", zoneFile)
 		err = fmt.Errorf("путь файла зоны вне разрешённой директории")
 		return JobResult{Success: false, Error: err}
 	}
@@ -1069,11 +1072,13 @@ ns1	%d	IN	A	%s
 		return os.WriteFile(zoneFile, []byte(zoneContent), 0644)
 	})
 	if err != nil {
+		Error("не удалось создать файл зоны: %v", err)
 		err = fmt.Errorf("не удалось создать файл зоны: %v", err)
 		return JobResult{Success: false, Error: err}
 	}
 
 	if err := fixPermissions(zoneFile); err != nil {
+		Error("ошибка прав доступа: %v", err)
 		err = fmt.Errorf("ошибка прав доступа: %v", err)
 		return JobResult{Success: false, Error: err}
 	}
@@ -1096,6 +1101,7 @@ zone "%s" IN {
 		return err
 	})
 	if err != nil {
+		Error("ошибка записи в конфиг: %v", err)
 		err = fmt.Errorf("ошибка записи в конфиг: %v", err)
 		return JobResult{Success: false, Error: err}
 	}
@@ -1111,6 +1117,7 @@ zone "%s" IN {
 	cmd2 := exec.CommandContext(ctx, "named-checkconf")
 	out, err := cmd2.CombinedOutput()
 	if err != nil {
+		Error("ошибка в конфигурации: %s", string(out))
 		err = fmt.Errorf("ошибка в конфигурации: %s", string(out))
 		return JobResult{Success: false, Error: err}
 	}
@@ -1174,12 +1181,14 @@ func executeDeleteZone(job *Job) JobResult {
 	}()
 
 	if !validateZoneName(job.ZoneName) {
+		Error("недопустимое имя зоны %s", job.ZoneName)
 		err = fmt.Errorf("недопустимое имя зоны")
 		return JobResult{Success: false, Error: err}
 	}
 
 	zone, exists := getZoneFromConfig(job.ZoneName)
 	if !exists {
+		Error("зона не найдена в конфигурации %s", job.ZoneName)
 		err = fmt.Errorf("зона не найдена в конфигурации")
 		return JobResult{Success: false, Error: err}
 	}
@@ -1194,6 +1203,7 @@ func executeDeleteZone(job *Job) JobResult {
 		return nil
 	})
 	if err != nil {
+		Error("не удалось удалить файл зоны: %v", err)
 		err = fmt.Errorf("не удалось удалить файл зоны: %v", err)
 		return JobResult{Success: false, Error: err}
 	}
@@ -1214,6 +1224,7 @@ func executeDeleteZone(job *Job) JobResult {
 	cmd := exec.CommandContext(ctx, "named-checkconf")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		Error("ошибка в конфигурации: %s", string(out))
 		err = fmt.Errorf("ошибка в конфигурации: %s", string(out))
 		return JobResult{Success: false, Error: err}
 	}
@@ -1266,12 +1277,14 @@ func executeAddRecord(job *Job) JobResult {
 
 	// Валидация имени зоны
 	if !validateZoneName(job.ZoneName) {
+		Error("недопустимое имя зоны: %s", job.ZoneName)
 		err = fmt.Errorf("недопустимое имя зоны: %s", job.ZoneName)
 		return JobResult{Success: false, Error: err}
 	}
 
 	// Валидация имени записи
 	if !validateRecordName(job.RecordName) {
+		Error("недопустимое имя записи: %s", job.RecordName)
 		err = fmt.Errorf("недопустимое имя записи: %s", job.RecordName)
 		return JobResult{Success: false, Error: err}
 	}
@@ -1312,12 +1325,14 @@ func executeAddRecord(job *Job) JobResult {
 	// Проверка существования зоны
 	zone, exists := getZoneFromConfig(job.ZoneName)
 	if !exists {
+		Error("зона %s не найдена в конфигурации", job.ZoneName)
 		err = fmt.Errorf("зона %s не найдена в конфигурации", job.ZoneName)
 		return JobResult{Success: false, Error: err}
 	}
 
 	// Проверка существования файла зоны
 	if _, err := os.Stat(zone.File); os.IsNotExist(err) {
+		Error("файл зоны не существует: %s", zone.File)
 		err = fmt.Errorf("файл зоны не существует: %s", zone.File)
 		return JobResult{Success: false, Error: err}
 	}
@@ -1332,6 +1347,7 @@ func executeAddRecord(job *Job) JobResult {
 		records, _ := readZoneFileSimple(zone.File)
 		for _, rec := range records {
 			if rec.Name == job.RecordName && rec.Type != "CNAME" {
+				Error("невозможно добавить CNAME запись для %s: уже существует запись типа %s", job.RecordName, rec.Type)
 				err = fmt.Errorf("невозможно добавить CNAME запись для %s: уже существует запись типа %s", job.RecordName, rec.Type)
 				return JobResult{Success: false, Error: err}
 			}
@@ -1346,6 +1362,7 @@ func executeAddRecord(job *Job) JobResult {
 			records, _ := readZoneFileSimple(zone.File)
 			for _, rec := range records {
 				if rec.Name == mxHostname && rec.Type == "CNAME" {
+					Error("MX запись не может указывать на CNAME: %s", mxHostname)
 					err = fmt.Errorf("MX запись не может указывать на CNAME: %s", mxHostname)
 					return JobResult{Success: false, Error: err}
 				}
@@ -1358,6 +1375,7 @@ func executeAddRecord(job *Job) JobResult {
 		records, _ := readZoneFileSimple(zone.File)
 		for _, rec := range records {
 			if rec.Name == job.RecordValue && rec.Type == "CNAME" {
+				Error("NS запись не может указывать на CNAME: %s", job.RecordValue)
 				err = fmt.Errorf("NS запись не может указывать на CNAME: %s", job.RecordValue)
 				return JobResult{Success: false, Error: err}
 			}
@@ -1377,6 +1395,7 @@ func executeAddRecord(job *Job) JobResult {
 			recordLine = fmt.Sprintf("%s\t%d\tIN\tMX\t%s\t%s",
 				job.RecordName, ttl, parts[0], parts[1])
 		} else {
+			Error("неверный формат MX записи %s", job.RecordValue)
 			err = fmt.Errorf("неверный формат MX записи")
 			return JobResult{Success: false, Error: err}
 		}
@@ -1395,6 +1414,7 @@ func executeAddRecord(job *Job) JobResult {
 		// Fallback на синхронную запись если буфер не инициализирован
 		err = withFileLock(zone.File, func() error {
 			if err := appendRecordToFile(zone.File, recordLine); err != nil {
+				Error("ошибка добавления записи: %v", err)
 				return fmt.Errorf("ошибка добавления записи: %v", err)
 			}
 			if err := incrementSerial(zone.File); err != nil {
@@ -1478,17 +1498,20 @@ func executeDeleteRecord(job *Job) JobResult {
 	}()
 
 	if !validateZoneName(job.ZoneName) {
+		Error("недопустимое имя зоны %s", job.ZoneName)
 		err = fmt.Errorf("недопустимое имя зоны")
 		return JobResult{Success: false, Error: err}
 	}
 
 	if !validateRecordName(job.RecordName) {
+		Error("недопустимое имя записи %s", job.RecordName)
 		err = fmt.Errorf("недопустимое имя записи")
 		return JobResult{Success: false, Error: err}
 	}
 
 	zone, exists := getZoneFromConfig(job.ZoneName)
 	if !exists {
+		Error("зона не найдена в конфигурации %s", job.ZoneName)
 		err = fmt.Errorf("зона не найдена в конфигурации")
 		return JobResult{Success: false, Error: err}
 	}
@@ -1516,11 +1539,13 @@ func executeDeleteRecord(job *Job) JobResult {
 		return incrementSerial(zone.File)
 	})
 	if err != nil {
+		Error("ошибка удаления записи: %v", err)
 		err = fmt.Errorf("ошибка удаления записи: %v", err)
 		return JobResult{Success: false, Error: err}
 	}
 
 	if err := fixPermissions(zone.File); err != nil {
+		Error("ошибка прав: %v", err)
 		err = fmt.Errorf("ошибка прав: %v", err)
 		return JobResult{Success: false, Error: err}
 	}
@@ -1575,7 +1600,7 @@ func (h *SyncHandler) UpdateSyncState(fileType, fileName, zoneName, filePath, ch
 		return 0, fmt.Errorf("ошибка вычисления checksum: %v", err)
 	}
 
-	content, err := ioutil.ReadFile(filePath)
+	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return 0, fmt.Errorf("ошибка чтения файла: %v", err)
 	}
@@ -2299,7 +2324,7 @@ func (r *ReplicaSync) saveFileAlreadyTransformed(filePath, content string) error
 	}
 
 	tmpPath := filePath + ".tmp"
-	if err := ioutil.WriteFile(tmpPath, []byte(content), 0640); err != nil {
+	if err := os.WriteFile(tmpPath, []byte(content), 0640); err != nil {
 		return fmt.Errorf("ошибка записи файла: %v", err)
 	}
 
@@ -2471,7 +2496,7 @@ func (r *ReplicaSync) saveFile(filePath, content string, fileInfo SyncFileInfo) 
 	}
 
 	tmpPath := filePath + ".tmp"
-	if err := ioutil.WriteFile(tmpPath, []byte(content), 0640); err != nil {
+	if err := os.WriteFile(tmpPath, []byte(content), 0640); err != nil {
 		return fmt.Errorf("ошибка записи файла: %v", err)
 	}
 
@@ -2654,13 +2679,11 @@ func (r *ReplicaSync) GetFilesUpdatedCount() int {
 }
 
 // APIKeyAuth проверяет API-ключ и права доступа
-// ... existing code ...
-
-// APIKeyAuth проверяет API-ключ и права доступа
 func APIKeyAuth(requiredPerm string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		apiKey := c.GetHeader("X-API-Key")
 		if apiKey == "" {
+			Warn("Попытка авторизации без ключа %s", c.ClientIP())
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"success": false,
 				"message": "Ошибка авторизации",
@@ -2685,6 +2708,7 @@ func APIKeyAuth(requiredPerm string) gin.HandlerFunc {
 		var key APIKey
 		// Ищем по префиксу, затем проверяем хеш
 		if err := Db.Where("key_prefix = ?", keyPrefix).First(&key).Error; err != nil {
+			Warn("Попытка авторизации по невалидному ключу %s с IP %s", keyPrefix, c.ClientIP())
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"success": false,
 				"message": "Неверный API-ключ",
@@ -2695,6 +2719,7 @@ func APIKeyAuth(requiredPerm string) gin.HandlerFunc {
 
 		// ПРОВЕРЯЕМ ХЕШ ВМЕСТО ПРЯМОГО СРАВНЕНИЯ
 		if !verifyAPIKey(apiKey, key.KeyHash) {
+			Warn("Попытка авторизации по невалидному ключу (не совпадает хеш) %s с IP %s", keyPrefix, c.ClientIP())
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"success": false,
 				"message": "Неверный API-ключ",
@@ -2704,6 +2729,7 @@ func APIKeyAuth(requiredPerm string) gin.HandlerFunc {
 		}
 
 		if key.IsExpired() {
+			Warn("Попытка авторизации по истекшему ключу %s с IP %s", keyPrefix, c.ClientIP())
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"success": false,
 				"message": "API-ключ истёк",
@@ -2713,6 +2739,7 @@ func APIKeyAuth(requiredPerm string) gin.HandlerFunc {
 		}
 
 		if requiredPerm != "" && !key.HasPermission(requiredPerm) {
+			Warn("Попытка авторизации с неподходящими правами %s с IP %s", keyPrefix, c.ClientIP())
 			c.JSON(http.StatusForbidden, gin.H{
 				"success": false,
 				"message": "Недостаточно прав",

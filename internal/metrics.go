@@ -2,7 +2,6 @@ package internal
 
 import (
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -206,7 +205,7 @@ func InitMetrics() {
 		},
 	)
 
-	log.Println("✓ Metrics system initialized")
+	Info("Metrics system initialized")
 }
 
 // MetricsMiddleware - middleware для сбора HTTP метрик
@@ -263,7 +262,7 @@ func (m *MetricsCollector) UpdateBusinessMetrics() {
 
 	zones, err := parseZoneConfig()
 	if err != nil {
-		log.Printf("Failed to update zone metrics: %v", err)
+		Error("Failed to update zone metrics: %v", err)
 		return
 	}
 
@@ -394,7 +393,7 @@ func StartMetricsUpdater() {
 		}
 	}()
 
-	log.Println("✓ Metrics updater started (interval: 30s)")
+	Info("Metrics updater started (interval: 30s)")
 }
 
 // MetricsHandler возвращает HTTP хендлер для Prometheus

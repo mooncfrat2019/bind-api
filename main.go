@@ -3,8 +3,6 @@ package main
 import (
 	"fmt"
 
-	"log"
-
 	"os"
 	"os/exec"
 
@@ -35,9 +33,8 @@ func main() {
 	if err := godotenv.Load(); err != nil {
 		app.Error(".env файл не найден")
 	}
-
-	app.InitConfig()
 	app.InitLogLevel()
+	app.InitConfig()
 	app.InitQueueConfig()
 
 	// Определяем роль
@@ -187,6 +184,6 @@ func main() {
 	}
 
 	if err := r.Run(port); err != nil {
-		log.Fatal(err)
+		app.Error("App run error: %v", err)
 	}
 }

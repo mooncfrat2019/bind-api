@@ -553,7 +553,7 @@ func HandleCreateAPIKey(c *gin.Context) {
 		CreatedAt:   apiKey.CreatedAt,
 	}
 
-	Debug("Создан API-ключ: ID=%d, Name=%s", apiKey.ID, apiKey.Name)
+	Warn("Создан API-ключ: ID=%d, Name=%s, Permissions=%s, IP=%s", apiKey.ID, apiKey.Name, response.Permissions, c.ClientIP())
 
 	sendResponse(c, http.StatusCreated, true, "API-ключ создан", response)
 }
