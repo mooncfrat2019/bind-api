@@ -111,12 +111,14 @@ func HandleListZones(c *gin.Context) {
 func HandleCreateZone(c *gin.Context) {
 	var req ZoneRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		Error("Ошибка валидации JSON при создании зоны")
 		sendResponse(c, http.StatusBadRequest, false, "Ошибка валидации JSON", err.Error())
 		return
 	}
 
 	// Валидация имени зоны
 	if !validateZoneName(req.Name) {
+		Error("Недопустимое имя зоны %s", req.Name)
 		sendResponse(c, http.StatusBadRequest, false,
 			"Недопустимое имя зоны",
 			"Имя зоны должно содержать только буквы, цифры, дефисы и точки, длина от 1 до 253 символов")
@@ -126,6 +128,7 @@ func HandleCreateZone(c *gin.Context) {
 	// Валидация обратной зоны если нужно
 	if strings.Contains(req.Name, "in-addr.arpa") || strings.Contains(req.Name, "ip6.arpa") {
 		if !validateReverseZoneName(req.Name) {
+			Error("Недопустимое имя обратной зоны %s", req.Name)
 			sendResponse(c, http.StatusBadRequest, false,
 				"Недопустимое имя обратной зоны",
 				"Неверный формат обратной зоны. Пример для IPv4: 1.168.192.in-addr.arpa")
@@ -136,6 +139,7 @@ func HandleCreateZone(c *gin.Context) {
 	// Валидация email
 	if req.Email != "" {
 		if !strings.Contains(req.Email, "@") || len(req.Email) > 255 {
+			Error("Недопустимый email адрес", req.Email)
 			sendResponse(c, http.StatusBadRequest, false,
 				"Недопустимый email адрес",
 				"Email должен содержать @ и быть не длиннее 255 символов")
@@ -145,6 +149,7 @@ func HandleCreateZone(c *gin.Context) {
 		// Проверка на недопустимые символы в email
 		emailParts := strings.Split(req.Email, "@")
 		if len(emailParts) != 2 {
+			Error("Недопустимый email адрес %s", req.Email)
 			sendResponse(c, http.StatusBadRequest, false,
 				"Недопустимый email адрес",
 				"Email должен содержать ровно один символ @")
@@ -155,6 +160,7 @@ func HandleCreateZone(c *gin.Context) {
 		domain := emailParts[1]
 
 		if len(localPart) == 0 || len(domain) == 0 {
+			Error("Недопустимый email адрес %s", req.Email)
 			sendResponse(c, http.StatusBadRequest, false,
 				"Недопустимый email адрес",
 				"Локальная часть и домен не могут быть пустыми")
@@ -166,6 +172,7 @@ func HandleCreateZone(c *gin.Context) {
 	if req.NsIP != "" {
 		ip := net.ParseIP(req.NsIP)
 		if ip == nil {
+			Error("Недопустимый IP адрес для NS записи %s", req.NsIP)
 			sendResponse(c, http.StatusBadRequest, false,
 				"Недопустимый IP адрес для NS записи",
 				"Укажите корректный IPv4 или IPv6 адрес")
@@ -175,6 +182,7 @@ func HandleCreateZone(c *gin.Context) {
 		// Для reverse зон проверяем соответствие IP
 		if strings.Contains(req.Name, "in-addr.arpa") {
 			if ip.To4() == nil {
+				Error("Несоответствие IP адреса")
 				sendResponse(c, http.StatusBadRequest, false,
 					"Несоответствие IP адреса",
 					"Для обратной зоны IPv4 необходимо указать IPv4 адрес")
@@ -185,6 +193,7 @@ func HandleCreateZone(c *gin.Context) {
 
 	// Проверка существования зоны
 	if zoneExistsInConfig(req.Name) {
+		Error("Зона уже существует %s", req.Name)
 		sendResponse(c, http.StatusConflict, false,
 			"Зона уже существует",
 			fmt.Sprintf("Зона %s уже существует в конфигурации", req.Name))
@@ -208,6 +217,7 @@ func HandleCreateZone(c *gin.Context) {
 
 	// Проверка что файл не существует
 	if _, err := os.Stat(zoneFilePath); err == nil {
+		Error("Файл зоны уже существует %s %s", req.Name, zoneFilePath)
 		sendResponse(c, http.StatusConflict, false,
 			"Файл зоны уже существует",
 			fmt.Sprintf("Файл %s уже существует", zoneFilePath))
@@ -227,6 +237,7 @@ func HandleCreateZone(c *gin.Context) {
 
 	// Проверяем что конфиг файл существует и доступен для записи
 	if _, err := os.Stat(targetConfigFile); os.IsNotExist(err) {
+		Error("Конфигурационный файл не найден %s", targetConfigFile)
 		sendResponse(c, http.StatusBadRequest, false,
 			"Конфигурационный файл не найден",
 			fmt.Sprintf("Файл %s не существует", targetConfigFile))
@@ -245,6 +256,7 @@ func HandleCreateZone(c *gin.Context) {
 	// Отправляем в очередь
 	result, err := submitJob(job)
 	if err != nil {
+		Error("Ошибка очереди заданий")
 		sendResponse(c, http.StatusInternalServerError, false,
 			"Ошибка очереди заданий",
 			err.Error())
@@ -296,6 +308,7 @@ func HandleGetZone(c *gin.Context) {
 
 	records, err := readZoneFileSimple(zone.File)
 	if err != nil {
+		Error("Зона не найдена или не читается %v", err.Error())
 		sendResponse(c, http.StatusNotFound, false, "Зона не найдена или не читается", err.Error())
 		return
 	}
@@ -338,12 +351,14 @@ func HandleDeleteZone(c *gin.Context) {
 func HandleAddRecord(c *gin.Context) {
 	zoneName := c.Param("name")
 	if !validateZoneName(zoneName) {
+		Error("Недопустимое имя зоны %s", zoneName)
 		sendResponse(c, http.StatusBadRequest, false, "Недопустимое имя зоны", nil)
 		return
 	}
 
 	var req RecordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		Error("Ошибка валидации JSON %s", err.Error())
 		sendResponse(c, http.StatusBadRequest, false, "Ошибка валидации JSON", err.Error())
 		return
 	}
@@ -360,6 +375,7 @@ func HandleAddRecord(c *gin.Context) {
 
 	result, err := submitJob(job)
 	if err != nil {
+		Error("Ошибка очереди %v", err.Error())
 		sendResponse(c, http.StatusInternalServerError, false, "Ошибка очереди", err.Error())
 		return
 	}
@@ -377,11 +393,13 @@ func HandleDeleteRecord(c *gin.Context) {
 	recordType := c.Param("type")
 
 	if !validateZoneName(zoneName) {
+		Error("Недопустимое имя зоны %s", zoneName)
 		sendResponse(c, http.StatusBadRequest, false, "Недопустимое имя зоны", nil)
 		return
 	}
 
 	if !validateRecordName(recordName) {
+		Error("Недопустимое имя записи %s", recordName)
 		sendResponse(c, http.StatusBadRequest, false, "Недопустимое имя записи", nil)
 		return
 	}
@@ -395,6 +413,7 @@ func HandleDeleteRecord(c *gin.Context) {
 
 	result, err := submitJob(job)
 	if err != nil {
+		Error("Ошибка очереди")
 		sendResponse(c, http.StatusInternalServerError, false, "Ошибка очереди", err.Error())
 		return
 	}
@@ -413,6 +432,7 @@ func HandleReload(c *gin.Context) {
 
 	result, err := submitJob(job)
 	if err != nil {
+		Error("Ошибка очереди")
 		sendResponse(c, http.StatusInternalServerError, false, "Ошибка очереди", err.Error())
 		return
 	}
@@ -563,6 +583,7 @@ func HandleListAPIKeys(c *gin.Context) {
 	if err := Db.Select("id, name, description, permissions, ip_address, expires_at, last_used_at, created_at").
 		Order("created_at DESC").
 		Find(&keys).Error; err != nil {
+		Error("Ошибка получения ключей")
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"message": "Ошибка получения ключей",
@@ -582,6 +603,7 @@ func HandleRevokeAPIKey(c *gin.Context) {
 
 	if currentKeyID, exists := c.Get("api_key_id"); exists {
 		if fmt.Sprintf("%v", currentKeyID) == keyID {
+			Error("Нельзя отозвать текущий клю %s", keyID)
 			c.JSON(http.StatusBadRequest, gin.H{
 				"success": false,
 				"message": "Нельзя отозвать текущий ключ",
@@ -591,6 +613,7 @@ func HandleRevokeAPIKey(c *gin.Context) {
 	}
 
 	if err := Db.Delete(&APIKey{}, keyID).Error; err != nil {
+		Error("Ошибка отзыва ключа %s", keyID)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"message": "Ошибка отзыва ключа",
@@ -611,12 +634,14 @@ func HandleSyncZoneRecords(c *gin.Context) {
 
 	zone, exists := getZoneFromConfig(zoneName)
 	if !exists {
+		Error("Зона не найдена %s", zoneName)
 		sendResponse(c, http.StatusNotFound, false, "Зона не найдена", nil)
 		return
 	}
 
 	records, err := readZoneFileSimple(zone.File)
 	if err != nil {
+		Error("Ошибка чтения зоны %s", zoneName)
 		sendResponse(c, http.StatusInternalServerError, false, "Ошибка чтения зоны", err.Error())
 		return
 	}
