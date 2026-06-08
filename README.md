@@ -1,8 +1,8 @@
 # 📘 BIND API
 
 **Репозиторий:** [github.com/mooncfrat2019/bind-api](https://github.com/mooncfrat2019/bind-api)  
-**Версия:** 0.4.0  
-**Последнее обновление:** Май 2026
+**Версия:** 0.4.10  
+**Последнее обновление:** Июнь 2026
 
 ---
 
@@ -17,8 +17,10 @@
 7. [Версионирование и откат](#7-версионирование-и-откат)
 8. [Master-Replica синхронизация](#8-master-replica-синхронизация)
 9. [Автоматическая проверка A-записей](#9-автоматическая-проверка-a-записей)
-10. [Мониторинг и отладка](#10-мониторинг-и-отладка)
-11. [Troubleshooting](#11-troubleshooting)
+10. [Фоновые процессы](#10-фоновые-процессы)
+11. [Мониторинг и метрики](#11-мониторинг-и-метрики)
+12. [Отладка](#12-отладка)
+13. [Troubleshooting](#13-troubleshooting)
 
 ---
 
@@ -33,15 +35,19 @@
 | Управление зонами | Создание, удаление, просмотр DNS-зон |
 | Управление записями | Добавление/удаление A, AAAA, CNAME, MX, TXT, NS записей |
 | Reverse DNS | Автоматическое создание PTR записей |
-| Очередь заданий | Последовательная обработка для защиты от race conditions |
+| Очередь заданий | Адаптивная обработка (normal/batch режимы) |
 | Аудит операций | Полное логирование всех изменений в PostgreSQL |
 | Валидация | Проверка синтаксиса перед применением |
 | Serial management | Автоматическое увеличение Serial при изменениях |
 | Версионирование | Сохранение всех версий конфигов с возможностью отката |
 | Master-Replica | Автоматическая синхронизация конфигурации между серверами |
 | Трансформация конфигов | Автоматическая конвертация master→slave при синхронизации |
-| **Автопроверка A-записей (v0.4.0)** | Реплика автоматически проверяет резолвинг и вызывает retransfer |
+| Автопроверка A-записей | Реплика автоматически проверяет резолвинг и вызывает retransfer |
+| Мониторинг named.conf | Автоматическое отслеживание изменений в named.conf |
+| Очистка orphan зон | Удаление записей о несуществующих зонах из БД |
+| Защита от brute-force | Блокировка IP после неудачных попыток авторизации |
 | API-ключи | Гибкая система авторизации с правами доступа |
+| Prometheus-метрики | Экспорт метрик для систем мониторинга |
 
 ### Технологии
 
@@ -55,8 +61,8 @@
 | ОС | РедОС 7.3 / CentOS 7+ |
 
 ### Структура проекта
-
 ```
+
 bind-api/
 ├── main.go                 # Точка входа, инициализация Gin-роутера
 ├── go.mod / go.sum         # Зависимости
@@ -68,9 +74,9 @@ bind-api/
     ├── types.go            # Модели данных
     ├── handlers.go         # HTTP-хендлеры
     ├── methods.go          # Бизнес-логика и middleware
-    └── utils.go            # Вспомогательные функции
+    ├── utils.go            # Вспомогательные функции
+    └── logger.go           # Система логирования
 ```
-
 ---
 
 ## 2. Архитектура
@@ -123,6 +129,7 @@ bind-api/
 | `admin` | Управление API-ключами | `/keys/*` |
 | `*` | Полный доступ | Все API-эндпоинты |
 | `X-Sync-Token` | Синхронизация master-replica | `/sync/*` |
+
 ---
 
 ## 3. Быстрый старт
@@ -135,7 +142,6 @@ bind-api/
 - Root-доступ к серверу
 
 ### 3.2. Установка
-
 ```bash
 # Клонирование репозитория
 git clone https://github.com/mooncfrat2019/bind-api.git
@@ -147,9 +153,7 @@ go mod tidy
 # Сборка
 CGO_ENABLED=1 go build -o bind-api main.go
 ```
-
 ### 3.3. Настройка PostgreSQL
-
 ```bash
 sudo -u postgres psql
 
@@ -166,9 +170,7 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA bind_api GRANT ALL ON SEQUENCES TO dns;
 
 \q
 ```
-
 ### 3.4. Настройка BIND на мастере
-
 ```bash
 # Добавить include в named.conf
 echo 'include "/etc/named.zones.conf";' | sudo tee -a /etc/named.conf
@@ -192,9 +194,7 @@ sudo chmod 640 /etc/rndc.key
 # Перезапустить BIND
 sudo systemctl restart named
 ```
-
 ### 3.5. Запуск MASTER
-
 ```bash
 # .env для MASTER
 APP_ROLE=master
@@ -212,12 +212,13 @@ API_PORT=:8080
 GIN_MODE=release
 SYNC_API_TOKEN=your_secure_sync_token_12345
 
+# Опционально: Bootstrap-ключ для первого запуска
+BIND_API_BOOTSTRAP_KEY=your-very-secure-key-min-32-characters-long
+
 # Запуск
 sudo ./bind-api
 ```
-
 ### 3.6. Запуск REPLICA
-
 ```bash
 # .env для REPLICA
 APP_ROLE=replica
@@ -247,12 +248,13 @@ MASTER_API_PORT=8080
 # Запуск
 sudo ./bind-api
 ```
-
 ---
 
 ## 4. Конфигурация
 
 ### 4.1. Переменные окружения
+
+#### Основные переменные
 
 | Переменная | По умолчанию | Описание |
 |------------|--------------|----------|
@@ -260,6 +262,15 @@ sudo ./bind-api
 | `BIND_ZONE_DIR` | `/var/named/` | Директория для файлов зон |
 | `BIND_NAMED_CONF` | `/etc/named.conf` | Основной конфиг BIND |
 | `BIND_ZONE_CONF` | `/etc/named.zones.conf` | Доп. файл для зон |
+| `API_PORT` | `:8080` | Порт API |
+| `GIN_MODE` | `release` | Режим Gin |
+| `LOG_LEVEL` | `INFO` | Уровень логирования: DEBUG, INFO, WARN, ERROR |
+
+#### PostgreSQL настройки
+
+| Переменная | По умолчанию | Описание |
+|------------|--------------|----------|
+| `BIND_API_DB_URL` | — | Полный DSN для подключения (приоритет над остальными) |
 | `BIND_API_DB_HOST` | `localhost` | Хост PostgreSQL |
 | `BIND_API_DB_PORT` | `5432` | Порт PostgreSQL |
 | `BIND_API_DB_USER` | `bindapi` | Пользователь БД |
@@ -267,9 +278,19 @@ sudo ./bind-api
 | `BIND_API_DB_NAME` | `bind_api` | Имя базы данных |
 | `BIND_API_DB_SSLMODE` | `disable` | SSL режим |
 | `BIND_API_DB_SCHEMA` | `public` | Схема для таблиц |
-| `API_PORT` | `:8080` | Порт API |
-| `GIN_MODE` | `release` | Режим Gin |
-| `SYNC_API_TOKEN` | — | Токен для синхронизации (MASTER) |
+
+#### Синхронизация (MASTER)
+
+| Переменная | По умолчанию | Описание |
+|------------|--------------|----------|
+| `SYNC_API_TOKEN` | — | Токен для синхронизации (минимум 32 символа) |
+| `SYNC_API_SUBNET` | — | Ограничение доступа к sync API по подсети (CIDR) |
+| `BIND_API_BOOTSTRAP_KEY` | — | Bootstrap API-ключ для первого запуска (32-120 символов) |
+
+#### Синхронизация (REPLICA)
+
+| Переменная | По умолчанию | Описание |
+|------------|--------------|----------|
 | `MASTER_URL` | — | URL мастера (REPLICA) |
 | `MASTER_API_TOKEN` | — | Токен для подключения к мастеру (REPLICA) |
 | `SYNC_INTERVAL` | `30` | Интервал опроса мастера (сек) |
@@ -279,9 +300,27 @@ sudo ./bind-api
 | `REPLICA_REMOVE_ALLOW_TRANSFER` | `false` | Удалять `allow-transfer` на реплике |
 | `REPLICA_DISABLE_IPV6` | `false` | Отключать IPv6 на реплике |
 | `REPLICA_EXTERNAL_IP` | `127.0.0.1` | Внешний IP реплики для проверки резолвинга |
-| `ALLOW_INSECURE_SYNC` | `false` | Разрешить sync API по HTTP (только для dev/test или доверенной сети) |
-| `MASTER_API_PORT` | `8080` | Порт API мастера для fallback-сборки URL из `REPLICA_MASTER_IP` |
-| `BIND_API_BOOTSTRAP_KEY` | — | Bootstrap API-ключ для первого запуска MASTER, создаётся с правами `*` и TTL 7 дней |
+| `ALLOW_INSECURE_SYNC` | `false` | Разрешить sync API по HTTP (только для dev/test) |
+| `MASTER_API_PORT` | `8080` | Порт API мастера для fallback-сборки URL |
+
+#### Очередь заданий (только MASTER)
+
+| Переменная | По умолчанию | Описание |
+|------------|--------------|----------|
+| `MAX_QUEUE_SIZE` | `1000` | Максимальный размер очереди заданий |
+| `WORKER_TIMEOUT` | `30` | Таймаут выполнения задания (сек) |
+| `BATCH_SIZE` | `10` | Размер пакета для batch-режима |
+| `BATCH_INTERVAL` | `5` | Интервал сброса пакета (сек) |
+| `QUEUE_THRESHOLD_LOW` | `0.3` | Порог переключения в normal режим (30%) |
+| `QUEUE_THRESHOLD_HIGH` | `0.8` | Порог переключения в batch режим (80%) |
+| `RELOAD_INTERVAL` | `10` | Интервал периодического reload в batch режиме (сек) |
+
+#### Фоновые процессы (только MASTER)
+
+| Переменная | По умолчанию | Описание |
+|------------|--------------|----------|
+| `SYNC_CLEANUP_INTERVAL` | `5m` | Интервал очистки sync_states от удалённых зон |
+
 ---
 
 ## 5. API Reference
@@ -298,7 +337,6 @@ sudo ./bind-api
   "data": {}
 }
 ```
-
 ### 5.2. Эндпоинты
 
 #### Публичные эндпоинты
@@ -306,6 +344,8 @@ sudo ./bind-api
 | Метод | Эндпоинт | Описание | Auth |
 |-------|----------|----------|------|
 | `GET` | `/status` | Статус сервиса | Нет |
+| `GET` | `/health` | Health check | Нет |
+| `GET` | `/metrics` | Prometheus-метрики | Нет |
 
 #### Эндпоинты чтения (`/read/*`, требуется `zone:read`)
 
@@ -343,41 +383,53 @@ sudo ./bind-api
 | `GET` | `/sync/file` | Получить файл (query params) |
 | `GET` | `/sync/zones` | Список зон для синхронизации |
 | `GET` | `/sync/zone/:zoneName` | Получить зону |
-| `GET` | `/sync/zone/:zoneName/records` | **Получить A/AAAA записи зоны (v0.4.0)** |
+| `GET` | `/sync/zone/:zoneName/records` | Получить A/AAAA записи зоны |
 | `GET` | `/sync/versions/:fileType` | Список версий файла |
 | `GET` | `/sync/version/:id` | Конкретная версия |
 | `POST` | `/sync/version/:id/rollback` | Откат к версии |
 | `DELETE` | `/sync/version/:id` | Удаление версии |
 
+#### Эндпоинты реплики (`REPLICA only`)
+
+| Метод | Эндпоинт | Описание |
+|-------|----------|----------|
+| `GET` | `/sync/status` | Статус синхронизации |
+| `GET` | `/sync/last-update` | Время последнего обновления |
+
 ### 5.3. Примеры запросов
 
 #### Создание зоны
-
 ```bash
 curl -X POST http://localhost:8080/api/write/zone \
   -H "Content-Type: application/json" \
   -H "X-API-Key: <...>" \
   -d '{"name": "test.local", "email": "admin.test.local", "ns_ip": "10.69.13.3"}'
 ```
-
 #### Добавление записи
-
 ```bash
 curl -X POST http://localhost:8080/api/write/zone/test.local/record \
   -H "Content-Type: application/json" \
   -H "X-API-Key: <...>" \
   -d '{"name": "www", "type": "A", "value": "192.168.1.100"}'
 ```
-
-#### Получение A-записей зоны (v0.4.0)
-
+#### Получение A/AAAA записей зоны
 ```bash
 curl -H "X-Sync-Token: <...>" \
   http://localhost:8080/api/sync/zone/test.local/records
 ```
-
+**Ответ:**
+```json
+{
+  "success": true,
+  "data": {
+    "records": [
+      {"name": "www", "type": "A", "value": "192.168.1.100"},
+      {"name": "api", "type": "AAAA", "value": "2001:db8::1"}
+    ]
+  }
+}
+```
 #### Создание API-ключа
-
 ```bash
 curl -X POST http://localhost:8080/api/keys/ \
   -H "Content-Type: application/json" \
@@ -389,14 +441,11 @@ curl -X POST http://localhost:8080/api/keys/ \
     "expires_in": 90
   }'
 ```
-
 #### Откат к версии
-
 ```bash
 curl -X POST http://localhost:8080/api/sync/version/12/rollback \
   -H "X-Sync-Token: <...>"
 ```
-
 ---
 
 ## 6. Авторизация и безопасность
@@ -404,11 +453,12 @@ curl -X POST http://localhost:8080/api/sync/version/12/rollback \
 ### 6.1. Система API-ключей
 
 API-ключи хранятся в таблице `api_keys` PostgreSQL:
-
 ```sql
 CREATE TABLE api_keys (
     id BIGSERIAL PRIMARY KEY,
     key VARCHAR(64) NOT NULL UNIQUE,
+    key_hash VARCHAR(64) NOT NULL,
+    key_prefix VARCHAR(10) NOT NULL,
     name VARCHAR(100) NOT NULL,
     description TEXT,
     permissions JSONB NOT NULL,
@@ -419,8 +469,27 @@ CREATE TABLE api_keys (
     updated_at TIMESTAMPTZ
 );
 ```
+**Поля:**
+- `key_hash` — хеш ключа (SHA256) для безопасного хранения
+- `key_prefix` — префикс ключа (первые 8 символов) для быстрого поиска
+- `permissions` — JSONB массив прав доступа
 
-### 6.2. Права доступа
+### 6.2. Bootstrap API-ключ
+
+При первом запуске MASTER можно создать временный административный ключ через переменную окружения:
+```bash
+export BIND_API_BOOTSTRAP_KEY="your-very-secure-key-min-32-characters-long"
+```
+**Требования:**
+- Минимум 32 символа
+- Максимум 120 символов
+- Создаётся только если таблица `api_keys` пуста
+- Срок действия: **7 дней**
+- Права: `*` (полный доступ)
+
+**Важно:** После первого входа создайте постоянный ключ через `/api/keys` и отзовите bootstrap-ключ.
+
+### 6.3. Права доступа
 
 | Право | Описание | Эндпоинты |
 |-------|----------|-----------|
@@ -430,9 +499,22 @@ CREATE TABLE api_keys (
 | `sync:read` | Синхронизация | `/sync/*` |
 | `*` | Полный доступ | Все эндпоинты |
 
-### 6.3. Ограничения
+### 6.4. Защита от brute-force
 
-- **IP-адрес:** Можно ограничить ключ конкретным IP
+Система автоматически защищает API от подбора ключей:
+
+- После **5 неудачных попыток** авторизации IP блокируется на **15 минут**
+- Автоматическая очистка старых попыток (каждые 5 минут)
+- Блокировка логируется: `journalctl -u bind-api | grep "заблокирован"`
+
+**Пример лога:**
+```
+
+[WARN] IP 192.168.1.100 заблокирован на 15 минут после 5 неудачных попыток
+```
+### 6.5. Ограничения
+
+- **IP-адрес:** Можно ограничить ключ конкретным IP или подсетью
 - **Срок действия:** Ключи могут иметь дату истечения
 - **Аудит:** Все запросы логируются с указанием ключа
 
@@ -450,7 +532,6 @@ CREATE TABLE api_keys (
 4. Можно откатиться к любой версии через API
 
 ### 7.2. Структура таблицы `sync_states`
-
 ```sql
 CREATE TABLE sync_states (
     id BIGSERIAL PRIMARY KEY,
@@ -465,55 +546,77 @@ CREATE TABLE sync_states (
     updated_at TIMESTAMPTZ
 );
 ```
+### 7.3. Автоматический мониторинг named.conf
 
+На MASTER сервере запущен фоновый процесс, который:
+
+- Каждые **30 секунд** проверяет изменения в `/etc/named.conf`
+- При обнаружении изменений сохраняет новую версию в БД
+- Позволяет откатить изменения, сделанные вручную через API
+
+**Логи:**
+```bash
+journalctl -u bind-api | grep "Обнаружены изменения"
+```
+**Пример лога:**
+```
+
+[INFO] Обнаружены изменения в /etc/named.conf, сохраняем версию 5
+```
 ---
 
-## 8. Работа с репликами
+## 8. Master-Replica синхронизация
 
 ### 8.1. Настройка подключения реплики к мастеру
 
 Для синхронизации реплика использует `MASTER_URL` как основной адрес API мастера.
 
-**Рекомендуемый вариант для production:**
-- указывать `MASTER_URL` в формате `https://...`;
-- завершать TLS на nginx / HAProxy / ingress / service mesh;
-- не публиковать sync API напрямую наружу;
-- ограничивать доступ к `/api/sync/*` по сети.
+#### Требования безопасности
 
-Пример:
+**Production:**
+- ✅ Используйте `MASTER_URL` с `https://`
+- ✅ Завершайте TLS на nginx/HAProxy/ingress
+- ✅ Ограничьте доступ к `/api/sync/*` по сети (firewall)
+- ✅ Используйте сложные `SYNC_API_TOKEN` (минимум 32 символа)
+- ✅ Настройте `SYNC_API_SUBNET` для ограничения по IP
 
-```shell
-MASTER_URL=https://master.example.internal MASTER_API_TOKEN=secret SYNC_INTERVAL=30
+**Dev/Test (не для production!):**
+- ⚠️ `ALLOW_INSECURE_SYNC=true` разрешает HTTP
+- ⚠️ Используйте только в изолированной сети
+- ⚠️ Fallback из `REPLICA_MASTER_IP` работает только с HTTP
+
+**Пример для production:**
+```bash
+MASTER_URL=https://master.example.internal
+MASTER_API_TOKEN=secret_token_min_32_chars
+SYNC_API_SUBNET=10.0.0.0/8
 ```
-
 #### Небезопасный режим для dev/test
 
 Для тестовой или изолированной внутренней среды можно разрешить HTTP:
-
-```shell
-ALLOW_INSECURE_SYNC=true MASTER_URL=http://10.10.10.3:8080
+```bash
+ALLOW_INSECURE_SYNC=true
+MASTER_URL=http://10.10.10.3:8080
 ```
-
 Если `MASTER_URL` не задан, но включён `ALLOW_INSECURE_SYNC=true`, приложение попытается автоматически собрать адрес sync API из:
 
 - `REPLICA_MASTER_IP`
 - `MASTER_API_PORT`
 
 То есть будет использован адрес вида:
-
-```shell
+```bash
 http://<REPLICA_MASTER_IP>:<MASTER_API_PORT>
 ```
-
-Пример:
-```shell
-ALLOW_INSECURE_SYNC=true REPLICA_MASTER_IP=10.10.10.3 MASTER_API_PORT=8080
+**Пример:**
+```bash
+ALLOW_INSECURE_SYNC=true
+REPLICA_MASTER_IP=10.10.10.3
+MASTER_API_PORT=8080
 ```
-
-В этом режиме:
-- `REPLICA_MASTER_IP` должен быть корректным IP-адресом;
-- `MASTER_API_PORT` должен быть числом от `1` до `65535`;
-- этот режим рекомендуется использовать только в dev/test или в доверенной закрытой сети.
+**В этом режиме:**
+- `REPLICA_MASTER_IP` должен быть корректным IP-адресом
+- `MASTER_API_PORT` должен быть числом от `1` до `65535`
+- Этот режим рекомендуется использовать только в dev/test или в доверенной закрытой сети
 
 ### 8.2. Назначение переменных реплики
 
@@ -542,6 +645,25 @@ ALLOW_INSECURE_SYNC=true REPLICA_MASTER_IP=10.10.10.3 MASTER_API_PORT=8080
 | `allow-transfer` | `{ ... }` | удаляется |
 | `listen-on-v6` | `{ any; }` | `{ none; }` |
 
+### 8.4. Автоматическая очистка удалённых зон
+
+На MASTER сервере запущен процесс, который:
+
+- Каждые **5 минут** проверяет `sync_states` на наличие удалённых зон
+- Удаляет записи о зонах, которых нет в текущем конфиге
+- Интервал настраивается: `SYNC_CLEANUP_INTERVAL=5m`
+
+**Логи:**
+```bash
+journalctl -u bind-api | grep "Очистка SyncStates"
+```
+**Пример лога:**
+```
+
+[INFO] 🧹 Мастер: проверка sync_states на наличие удаленных зон...
+[INFO] 🗑️ Удалена зона old.local из sync_states (удалено 3 записей)
+[INFO] ✅ Очистка SyncStates завершена. Удалено зон: 1
+```
 ---
 
 ## 9. Автоматическая проверка A-записей (v0.4.0)
@@ -556,9 +678,11 @@ ALLOW_INSECURE_SYNC=true REPLICA_MASTER_IP=10.10.10.3 MASTER_API_PORT=8080
 4. Если хотя бы одна запись не резолвится → выполняет `rndc retransfer`
 5. Повторяет проверку после retransfer
 
-### 9.2. Логирование
+**Примечание:** Эндпоинт `/api/sync/zone/:name/records` возвращает **только** записи типов A и AAAA.
 
+### 9.2. Логирование
 ```
+
 === Начинаем проверку зон и A записей ===
 Проверка резолвинга test.space.space через реплику 10.69.13.10, ожидается 10.10.100.2
 ✓ Запись test.space.space успешно резолвится в 10.10.100.2
@@ -567,7 +691,6 @@ Retransfer для зоны space.space выполнен успешно
 ✓ Зона space.space полностью синхронизирована
 === Проверка зон завершена ===
 ```
-
 ### 9.3. Парсинг вывода nslookup
 
 Функция `parseNslookupForIP` извлекает IPv4-адрес из вывода `nslookup`, игнорируя:
@@ -578,23 +701,124 @@ Retransfer для зоны space.space выполнен успешно
 
 ---
 
-## 10. Мониторинг и отладка
+## 10. Фоновые процессы
 
-### 10.1. Логи приложения
+На MASTER сервере работают следующие фоновые процессы:
+
+| Процесс | Интервал | Назначение |
+|---------|----------|------------|
+| **Очистка попыток авторизации** | 5 мин | Удаление старых записей о неудачных попытках входа |
+| **Мониторинг named.conf** | 30 сек | Отслеживание изменений в конфигурации BIND |
+| **Очистка orphan зон** | 5 мин | Удаление записей о несуществующих зонах из БД |
+
+Все процессы запускаются автоматически при старте приложения в роли `master`.
+
+---
+
+## 11. Мониторинг и метрики
+
+### 11.1. Prometheus-метрики
+
+Эндпоинт `/metrics` возвращает метрики в формате Prometheus:
 
 ```bash
-sudo journalctl -u bind-api -f
+curl http://localhost:8080/metrics
 ```
 
-### 10.2. Проверка очереди
+**Доступные метрики:**
 
-```bash
+| Метрика | Описание |
+|---------|----------|
+| `bind_api_operations_total` | Всего операций (с лейблами type, status) |
+| `bind_api_operations_duration_seconds` | Длительность операций (histogram) |
+| `bind_api_queue_size` | Текущий размер очереди заданий |
+| `bind_api_queue_mode` | Текущий режим очереди (0=normal, 1=batch) |
+| `bind_api_zones_total` | Количество зон |
+| `bind_api_records_total` | Количество записей |
+| `bind_api_replica_checks_total` | Проверки реплик (с лейблом resolved) |
+| `bind_api_replica_retransfers_total` | Операции retransfer |
+| `bind_api_auth_attempts_total` | Попытки авторизации (с лейблом success) |
+
+**Пример вывода:**
+```
+# HELP bind_api_operations_total Total number of operations
+# TYPE bind_api_operations_total counter
+bind_api_operations_total{type="add_record",status="success"} 1250
+bind_api_operations_total{type="create_zone",status="success"} 45
+
+# HELP bind_api_queue_size Current queue size
+# TYPE bind_api_queue_size gauge
+bind_api_queue_size 12
+```
+
+### 11.2. Health check
+
+```shell
+curl http://localhost:8080/health
+```
+
+
+**Ответ:**
+```json
+{
+  "status": "healthy",
+  "timestamp": "2026-06-08T10:30:00Z"
+}
+```
+
+
+### 11.3. Интеграция с Prometheus
+
+**Пример scrape_config:**
+```yaml
+scrape_configs:
+  - job_name: 'bind-api'
+    static_configs:
+      - targets: ['localhost:8080']
+    metrics_path: '/metrics'
+```
+
+
+---
+
+## 12. Отладка
+
+### 12.1. Логи приложения
+
+```shell
+# Просмотр логов в реальном времени
+sudo journalctl -u bind-api -f
+
+# Последние 100 записей
+sudo journalctl -u bind-api -n 100
+
+# Логи за последний час
+sudo journalctl -u bind-api --since "1 hour ago"
+```
+
+
+### 12.2. Уровни логирования
+
+Установите переменную `LOG_LEVEL` для детальной отладки:
+
+```shell
+LOG_LEVEL=DEBUG  # Все сообщения
+LOG_LEVEL=INFO   # По умолчанию
+LOG_LEVEL=WARN   # Только предупреждения и ошибки
+LOG_LEVEL=ERROR  # Только ошибки
+```
+
+
+### 12.3. Проверка очереди
+
+```shell
 curl http://localhost:8080/api/status | jq '.data.queue_size'
 ```
 
-### 10.3. Проверка БД
 
-```bash
+### 12.4. Проверка БД
+
+```shell
 PGPASSWORD=password psql -h localhost -U dns -d dns
 
 # Последние операции
@@ -605,13 +829,18 @@ SELECT version, checksum, last_modified
 FROM bind_api.sync_states 
 WHERE file_name = '/var/named/test.local.zone' 
 ORDER BY version DESC;
+
+# API-ключи
+SELECT id, name, permissions, expires_at, last_used_at 
+FROM bind_api.api_keys;
 ```
+
 
 ---
 
-## 11. Troubleshooting
+## 13. Troubleshooting
 
-### 11.1. Частые проблемы
+### 13.1. Частые проблемы
 
 | Проблема | Причина | Решение |
 |----------|---------|---------|
@@ -620,11 +849,13 @@ ORDER BY version DESC;
 | `401 Unauthorized` | Нет API-ключа | Добавить `X-API-Key` заголовок |
 | `403 Forbidden` | Недостаточно прав | Проверить permissions ключа |
 | `zone transfer failed` | Не настроен allow-transfer | Добавить на мастере |
-| **Запись не резолвится на реплике (v0.4.0)** | Не выполнен retransfer | Проверить логи, REPLICA_EXTERNAL_IP |
+| Запись не резолвится на реплике | Не выполнен retransfer | Проверить логи, `REPLICA_EXTERNAL_IP` |
+| IP заблокирован | Много неудачных попыток | Подождать 15 минут или очистить вручную |
+| Bootstrap-ключ не создан | Таблица не пуста или ключ короткий | Проверить длину ключа (32-120 символов) |
 
-### 11.2. Диагностика
+### 13.2. Диагностика
 
-```bash
+```shell script
 # Проверить права
 ls -la /etc/named.conf /var/named/*.zone
 
@@ -640,16 +871,31 @@ sudo rndc retransfer test.local
 
 # Проверка резолвинга через реплику
 nslookup test.local 100.69.13.4
+
+# Проверить слушает ли порт
+sudo netstat -tlnp | grep 8080
 ```
 
-### 11.3. Логи синхронизации зон
+
+### 13.3. Логи синхронизации зон
 
 Для отладки проблем с синхронизацией зон выполните на реплике:
 
-```bash
+```shell script
 sudo journalctl -u bind-api -f | grep -E "(CheckARecordResolve|retransfer|зон)"
 ```
 
+
+### 13.4. Очистка заблокированных IP
+
+Если нужно срочно разблокировать IP:
+
+```shell script
+# Перезапуск приложения (очистит память)
+sudo systemctl restart bind-api
+
+# Или дождаться автоматической разблокировки (15 минут)
+```
 ---
 
 ## 📞 Поддержка
@@ -661,8 +907,9 @@ sudo journalctl -u bind-api -f | grep -E "(CheckARecordResolve|retransfer|зон
 3. Проверьте синтаксис BIND (`named-checkconf`)
 4. Проверьте права на файлы
 5. Убедитесь что API-ключ действителен и имеет нужные права
-6. **Для проблем с синхронизацией зон** проверьте `REPLICA_EXTERNAL_IP` и доступность DNS
+6. Для проблем с синхронизацией зон проверьте `REPLICA_EXTERNAL_IP` и доступность DNS
+7. Для проблем с авторизацией проверьте логи на предмет блокировок IP
 
 ---
 
-**© 2026 BIND Manager API | Версия 0.4.0**
+**© 2026 BIND API | Версия 0.4.10**
