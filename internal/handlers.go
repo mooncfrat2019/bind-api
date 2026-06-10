@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -445,11 +446,19 @@ func HandleReload(c *gin.Context) {
 }
 
 func HandleAuditLog(c *gin.Context) {
-	limit := 100
+	limitStr := c.Query("limit")
+	limit := 10
+	if parsed, err := strconv.Atoi(limitStr); err == nil && parsed > 0 {
+		limit = parsed
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
 	zoneName := c.Query("zone")
 	status := c.Query("status")
 	jobType := c.Query("job_type")
-
+	recordName := c.Query("record")
 	query := Db.Model(&AuditLog{})
 
 	if zoneName != "" {
@@ -461,14 +470,30 @@ func HandleAuditLog(c *gin.Context) {
 	if jobType != "" {
 		query = query.Where("job_type = ?", jobType)
 	}
+	if recordName != "" {
+		query = query.Where("record_name = ?", recordName)
+	}
 
 	var logs []AuditLog
 	if err := query.Order("created_at DESC").Limit(limit).Find(&logs).Error; err != nil {
+		Error("Error in HandleAuditLog %v", err)
 		sendResponse(c, http.StatusInternalServerError, false, "Ошибка чтения аудита", err.Error())
 		return
 	}
 
-	sendResponse(c, http.StatusOK, true, "Журнал аудита", gin.H{"logs": logs})
+	responseData := gin.H{
+		"logs": logs,
+		"filters": gin.H{
+			"zone":        zoneName,
+			"status":      status,
+			"job_type":    jobType,
+			"record_name": recordName,
+			"limit":       limit,
+		},
+		"count": len(logs),
+	}
+
+	sendResponse(c, http.StatusOK, true, "Журнал аудита", responseData)
 }
 
 func HandleAuditStats(c *gin.Context) {
