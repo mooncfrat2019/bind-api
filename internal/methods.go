@@ -1337,48 +1337,21 @@ func executeAddRecord(job *Job) JobResult {
 		return JobResult{Success: false, Error: err}
 	}
 
-	// Проверка на дубликат (опционально, можно убрать для скорости)
-	// if err = validateDuplicateRecord(zone.File, job.RecordName, recordType, job.RecordValue); err != nil {
-	// 	return JobResult{Success: false, Error: err}
-	// }
-
-	// Специальные проверки для CNAME записей
-	if recordType == "CNAME" {
-		records, _ := readZoneFileSimple(zone.File)
-		for _, rec := range records {
-			if rec.Name == job.RecordName && rec.Type != "CNAME" {
-				Error("невозможно добавить CNAME запись для %s: уже существует запись типа %s", job.RecordName, rec.Type)
-				err = fmt.Errorf("невозможно добавить CNAME запись для %s: уже существует запись типа %s", job.RecordName, rec.Type)
-				return JobResult{Success: false, Error: err}
-			}
-		}
+	// === ПРОВЕРКА НА СУЩЕСТВОВАНИЕ ЗАПИСИ ===
+	// Читаем текущие записи зоны
+	records, err := readZoneFileSimple(zone.File)
+	if err != nil {
+		Error("ошибка чтения зоны %s: %v", job.ZoneName, err)
+		err = fmt.Errorf("ошибка чтения зоны: %v", err)
+		return JobResult{Success: false, Error: err}
 	}
 
-	// Специальные проверки для MX записей
-	if recordType == "MX" {
-		parts := strings.Fields(job.RecordValue)
-		if len(parts) == 2 {
-			mxHostname := parts[1]
-			records, _ := readZoneFileSimple(zone.File)
-			for _, rec := range records {
-				if rec.Name == mxHostname && rec.Type == "CNAME" {
-					Error("MX запись не может указывать на CNAME: %s", mxHostname)
-					err = fmt.Errorf("MX запись не может указывать на CNAME: %s", mxHostname)
-					return JobResult{Success: false, Error: err}
-				}
-			}
-		}
-	}
-
-	// Специальные проверки для NS записей
-	if recordType == "NS" {
-		records, _ := readZoneFileSimple(zone.File)
-		for _, rec := range records {
-			if rec.Name == job.RecordValue && rec.Type == "CNAME" {
-				Error("NS запись не может указывать на CNAME: %s", job.RecordValue)
-				err = fmt.Errorf("NS запись не может указывать на CNAME: %s", job.RecordValue)
-				return JobResult{Success: false, Error: err}
-			}
+	// Ищем запись с таким же именем и типом
+	var existingRecordIndex int = -1
+	for i, rec := range records {
+		if rec.Name == job.RecordName && rec.Type == recordType {
+			existingRecordIndex = i
+			break
 		}
 	}
 
@@ -1404,6 +1377,93 @@ func executeAddRecord(job *Job) JobResult {
 			job.RecordName, ttl, recordType, job.RecordValue)
 	}
 
+	// === ЕСЛИ ЗАПИСЬ СУЩЕСТВУЕТ - ОБНОВЛЯЕМ ЕЁ ===
+	if existingRecordIndex >= 0 {
+		Debug("Запись %s типа %s уже существует, выполняем обновление", job.RecordName, recordType)
+
+		err = withFileLock(zone.File, func() error {
+			// Удаляем старую запись
+			if err := deleteRecordFromFile(zone.File, job.RecordName, recordType); err != nil {
+				return fmt.Errorf("ошибка удаления старой записи: %v", err)
+			}
+
+			// Добавляем новую запись с обновленными данными
+			if err := appendRecordToFile(zone.File, recordLine); err != nil {
+				return fmt.Errorf("ошибка добавления новой записи: %v", err)
+			}
+
+			// Увеличиваем serial
+			if err := incrementSerial(zone.File); err != nil {
+				return fmt.Errorf("ошибка обновления Serial: %v", err)
+			}
+
+			return nil
+		})
+
+		if err != nil {
+			Error("ошибка обновления записи: %v", err)
+			return JobResult{Success: false, Error: err}
+		}
+
+		Info("Запись %s типа %s обновлена в зоне %s", job.RecordName, recordType, job.ZoneName)
+
+		// === АВТО-СОЗДАНИЕ ОБРАТНОЙ ЗОНЫ И PTR ЗАПИСИ (асинхронно) ===
+		if (recordType == "A" || recordType == "AAAA") && job.RecordValue != "" {
+			go func() {
+				zoneEmail := "admin." + job.ZoneName
+				zoneNsIP := ""
+				serverIPs := getServerIPs()
+				if len(serverIPs) > 0 {
+					zoneNsIP = serverIPs[0]
+				}
+
+				// Создаем обратную зону если нужно
+				if err := ensureReverseZoneExists(job.RecordValue, zoneEmail, zoneNsIP); err != nil {
+					Error("Не удалось создать обратную зону для %s: %v", job.RecordValue, err)
+				}
+
+				// Добавляем PTR запись
+				ptrName := job.ReversePtr
+				if ptrName == "" {
+					ptrName = job.RecordName + "." + job.ZoneName
+					if !strings.HasSuffix(ptrName, ".") {
+						ptrName += "."
+					}
+				} else if !strings.HasSuffix(ptrName, ".") {
+					ptrName += "."
+				}
+
+				if err := addPtrRecord(job.RecordValue, ptrName, ttl); err != nil {
+					Error("Не удалось создать PTR запись: %v", err)
+				}
+			}()
+		}
+
+		// Обновляем состояние для синхронизации (асинхронно)
+		if SH != nil {
+			go SH.UpdateSyncState("zone_file", zone.File, job.ZoneName, zone.File, "api")
+		}
+
+		// Обновляем метрики записей (асинхронно)
+		if Metrics != nil {
+			go Metrics.UpdateBusinessMetrics()
+		}
+
+		return JobResult{
+			Success: true,
+			Message: fmt.Sprintf("Запись %s типа %s обновлена", job.RecordName, recordType),
+			Data: gin.H{
+				"zone":    job.ZoneName,
+				"record":  job.RecordName,
+				"type":    recordType,
+				"value":   job.RecordValue,
+				"ttl":     ttl,
+				"updated": true,
+			},
+		}
+	}
+
+	// === ЕСЛИ ЗАПИСЬ НЕ СУЩЕСТВУЕТ - ДОБАВЛЯЕМ НОВУЮ ===
 	Debug("Асинхронное добавление записи в зону %s: %s", job.ZoneName, recordLine)
 
 	// === АСИНХРОННАЯ ЗАПИСЬ ===
