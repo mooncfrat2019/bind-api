@@ -185,6 +185,8 @@ func (b *AsyncRecordBuffer) writeToZone(zoneName string, records []string) {
 	}
 
 	errPermissions := fixPermissions(zone.File)
-	Error("async buffer error permissions error: %s, %v, %v", zoneName, records, errPermissions)
+	if errPermissions != nil {
+		Error("async buffer error permissions error: %s, %v, %v", zoneName, records, errPermissions)
+	}
 	PendingReload = true
 }
