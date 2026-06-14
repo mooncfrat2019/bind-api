@@ -143,6 +143,10 @@ func main() {
 				zoneRead.GET("/audit/stats", app.HandleAuditStats)
 				zoneRead.GET("/zones", app.HandleListZones)
 				zoneRead.GET("/zone/:name", app.HandleGetZone)
+
+				// Работа с версиями
+				zoneRead.GET("/versions/:fileType", app.SH.GetVersions)
+				zoneRead.GET("/version/:id", app.SH.GetVersion)
 			}
 			zoneWrite := api.Group("/write").Use(app.APIKeyAuth("zone:write"))
 			{
@@ -152,8 +156,10 @@ func main() {
 				zoneWrite.POST("/zone/:name/record", app.HandleAddRecord)
 				zoneWrite.DELETE("/zone/:name/record/:record/:type", app.HandleDeleteRecord)
 				zoneWrite.POST("/reload", app.HandleReload)
-				// позволяет выполнить rollback с правами write
+
+				// Работа с версиями
 				zoneWrite.POST("/version/:id/rollback", app.SH.RollbackVersion)
+				zoneWrite.DELETE("/version/:id", app.SH.DeleteVersion)
 			}
 
 			// Управление ключами (требуется admin)
