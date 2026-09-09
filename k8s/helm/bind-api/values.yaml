@@ -6,7 +6,7 @@ global:
 
 # === Настройки образа BIND-API ===
 image:
-  repository: bind-api
+  repository: zix2045/bind-api
   tag: latest
   pullPolicy: Always
 
@@ -88,16 +88,3 @@ zonesStorage:
   # Создать PV вручную (для OpenEBS hostpath)
   createPV: false
   hostPath: ""  # Путь на узле для hostPath PV
-
-# === PostgreSQL ===
-postgresql:
-  enabled: true
-  # ...
-  primary:
-    persistence:
-      enabled: true
-      size: 5Gi
-      storageClass: ""
-      # Создать PV вручную (для OpenEBS hostpath)
-      createPV: false
-      hostPath: ""  # Путь на узле для hostPath PV
