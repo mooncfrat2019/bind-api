@@ -6,8 +6,9 @@ metadata:
   labels:
     {{- include "bind-api.labels" . | nindent 4 }}
 data:
-  # Основной конфиг BIND
+  # Основной конфиг BIND - ИСПРАВЛЕННЫЙ
   named.conf: |
+    // Глобальные настройки
     options {
         directory "/var/named";
         pid-file "/var/named/named.pid";
@@ -22,15 +23,16 @@ data:
         listen-on port 53 { any; };
         listen-on-v6 port 53 { any; };
 
-        // RNDC
-        controls {
-            inet 127.0.0.1 port 953 allow { 127.0.0.1; } keys { "rndc-key"; };
-        };
-
         // Логирование
         querylog yes;
     };
 
+    // RNDC controls - ВНЕ блока options!
+    controls {
+        inet 127.0.0.1 port 953 allow { 127.0.0.1; } keys { "rndc-key"; };
+    };
+
+    // Ключ RNDC
     key "rndc-key" {
         algorithm hmac-sha256;
         secret "{{ .Values.secrets.rndcKeySecret }}";
