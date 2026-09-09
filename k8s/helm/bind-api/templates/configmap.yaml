@@ -32,10 +32,10 @@ data:
         inet 127.0.0.1 port 953 allow { 127.0.0.1; } keys { "rndc-key"; };
     };
 
-    // Ключ RNDC
+    # Ключ RNDC
     key "rndc-key" {
-        algorithm hmac-sha256;
-        secret "{{ .Values.secrets.rndcKeySecret }}";
+    algorithm hmac-sha256;
+    secret "{{ .Values.secrets.rndcKeySecret }}";
     };
 
     // Включение динамических зон
