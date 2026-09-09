@@ -36,6 +36,19 @@ secrets:
 config:
   logLevel: DEBUG
   apiPort: ":8080"
+  queue:
+    maxSize: 1000
+    workerTimeout: 180
+    batchSize: 50
+    batchInterval: 5
+    thresholdLow: 0.1
+    thresholdHigh: 0.3
+    reloadInterval: 10
+  sync:
+    cleanupInterval: "5m"
+    interval: 30
+    subnet: "10.0.0.0/8"
+    allowInsecure: false
 
 service:
   dns:

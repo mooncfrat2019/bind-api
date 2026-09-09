@@ -19,8 +19,8 @@ data:
         allow-transfer {{ include "bind-api.bindAllowTransfer" . }};
 
         // Слушаем все интерфейсы
-        listen-on port 53 { {{ range .Values.bind.config.listenOn }}{{ . }}; {{ end }} };
-        listen-on-v6 port 53 { {{ range .Values.bind.config.listenOnV6 }}{{ . }}; {{ end }} };
+        listen-on port 53 { any; };
+        listen-on-v6 port 53 { any; };
 
         // RNDC
         controls {
@@ -45,24 +45,57 @@ data:
     // Не редактировать вручную
 
   # Переменные окружения приложения
-  APP_ROLE: {{ .Values.role | quote }}
-  API_PORT: {{ .Values.config.apiPort | quote }}
+  {{- if .Values.config }}
+  {{- if .Values.config.logLevel }}
   LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  {{- else }}
+  LOG_LEVEL: "INFO"
+  {{- end }}
+  {{- else }}
+  LOG_LEVEL: "INFO"
+  {{- end }}
+
+  {{- if .Values.config }}
+  {{- if .Values.config.apiPort }}
+  API_PORT: {{ .Values.config.apiPort | quote }}
+  {{- else }}
+  API_PORT: ":8080"
+  {{- end }}
+  {{- else }}
+  API_PORT: ":8080"
+  {{- end }}
 
   # Настройки очереди
-  MAX_QUEUE_SIZE: {{ .Values.config.queue.maxSize | quote }}
-  WORKER_TIMEOUT: {{ .Values.config.queue.workerTimeout | quote }}
-  BATCH_SIZE: {{ .Values.config.queue.batchSize | quote }}
-  BATCH_INTERVAL: {{ .Values.config.queue.batchInterval | quote }}
-  QUEUE_THRESHOLD_LOW: {{ .Values.config.queue.thresholdLow | quote }}
-  QUEUE_THRESHOLD_HIGH: {{ .Values.config.queue.thresholdHigh | quote }}
-  RELOAD_INTERVAL: {{ .Values.config.queue.reloadInterval | quote }}
+  {{- if and .Values.config .Values.config.queue }}
+  MAX_QUEUE_SIZE: {{ .Values.config.queue.maxSize | default 1000 | quote }}
+  WORKER_TIMEOUT: {{ .Values.config.queue.workerTimeout | default 180 | quote }}
+  BATCH_SIZE: {{ .Values.config.queue.batchSize | default 50 | quote }}
+  BATCH_INTERVAL: {{ .Values.config.queue.batchInterval | default 5 | quote }}
+  QUEUE_THRESHOLD_LOW: {{ .Values.config.queue.thresholdLow | default 0.1 | quote }}
+  QUEUE_THRESHOLD_HIGH: {{ .Values.config.queue.thresholdHigh | default 0.3 | quote }}
+  RELOAD_INTERVAL: {{ .Values.config.queue.reloadInterval | default 10 | quote }}
+  {{- else }}
+  MAX_QUEUE_SIZE: "1000"
+  WORKER_TIMEOUT: "180"
+  BATCH_SIZE: "50"
+  BATCH_INTERVAL: "5"
+  QUEUE_THRESHOLD_LOW: "0.1"
+  QUEUE_THRESHOLD_HIGH: "0.3"
+  RELOAD_INTERVAL: "10"
+  {{- end }}
 
   # Настройки синхронизации
-  SYNC_CLEANUP_INTERVAL: {{ .Values.config.sync.cleanupInterval | quote }}
-  SYNC_API_SUBNET: {{ .Values.config.sync.subnet | quote }}
-  SYNC_INTERVAL: {{ .Values.config.sync.interval | quote }}
-  ALLOW_INSECURE_SYNC: {{ .Values.config.sync.allowInsecure | quote }}
+  {{- if and .Values.config .Values.config.sync }}
+  SYNC_CLEANUP_INTERVAL: {{ .Values.config.sync.cleanupInterval | default "5m" | quote }}
+  SYNC_API_SUBNET: {{ .Values.config.sync.subnet | default "10.0.0.0/8" | quote }}
+  SYNC_INTERVAL: {{ .Values.config.sync.interval | default 30 | quote }}
+  ALLOW_INSECURE_SYNC: {{ .Values.config.sync.allowInsecure | default false | quote }}
+  {{- else }}
+  SYNC_CLEANUP_INTERVAL: "5m"
+  SYNC_API_SUBNET: "10.0.0.0/8"
+  SYNC_INTERVAL: "30"
+  ALLOW_INSECURE_SYNC: "false"
+  {{- end }}
 
   # Пути
   BIND_ZONE_DIR: "/var/named/"
@@ -76,3 +109,6 @@ data:
   BIND_API_DB_NAME: {{ .Values.postgresql.auth.database | quote }}
   BIND_API_DB_SSLMODE: "disable"
   {{- end }}
+
+  # Роль сервера
+  APP_ROLE: {{ .Values.role | default "master" | quote }}
