@@ -1,5 +1,3 @@
-# k8s/helm/bind-api/values.master.minimal.yaml
-
 role: master
 
 replicaCount:
@@ -13,6 +11,16 @@ postgresql:
     username: bindapi
     password: "test-bindapi-password"
     database: bind_api
+  primary:
+    persistence:
+      enabled: true
+      size: 5Gi
+      storageClass: openebs-hostpath
+
+zonesStorage:
+  enabled: true
+  size: 10Gi
+  storageClass: openebs-hostpath
 
 secrets:
   postgresPassword: "test-bindapi-password"
