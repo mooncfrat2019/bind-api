@@ -2,7 +2,7 @@ Thank you for installing {{ .Chart.Name }}!
 
 Release Name: {{ .Release.Name }}
 Namespace: {{ .Release.Namespace }}
-Role: {{ .Values.role }}
+Role: {{ .Values.role | default "master" }}
 
 === DNS Access ===
 
@@ -12,23 +12,44 @@ Internal DNS (within cluster):
   Use in CoreDNS configuration or pod DNS settings
 
 External DNS:
+{{- if .Values.service }}
+{{- if .Values.service.dns }}
 {{- if eq .Values.service.dns.type "LoadBalancer" }}
   Get the external IP with:
     kubectl get svc -n {{ .Release.Namespace }} {{ include "bind-api.fullname" . }}-dns-external
   Wait for EXTERNAL-IP to be assigned, then use that IP as your DNS server
 {{- else if eq .Values.service.dns.type "NodePort" }}
-  Access via any node IP on port: {{ .Values.service.dns.nodePort }}
+  Access via any node IP on port: {{ .Values.service.dns.nodePort | default 30053 }}
+{{- else }}
+  Access via ClusterIP service: {{ include "bind-api.fullname" . }}-dns-internal
+{{- end }}
+{{- else }}
+  Access via ClusterIP service: {{ include "bind-api.fullname" . }}-dns-internal
+{{- end }}
+{{- else }}
+  Access via ClusterIP service: {{ include "bind-api.fullname" . }}-dns-internal
 {{- end }}
 
 === API Access ===
 
+{{- if .Values.ingress }}
 {{- if .Values.ingress.enabled }}
+{{- if .Values.ingress.hosts }}
 API URL: https://{{ (index .Values.ingress.hosts 0).host }}
+{{- else }}
+API URL: https://bind-api.example.com
+{{- end }}
 {{- else }}
 Internal API:
   Service: {{ include "bind-api.fullname" . }}-api
-  Port: {{ .Values.service.api.port }}
-  URL: http://{{ include "bind-api.fullname" . }}-api.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.api.port }}
+  Port: {{ .Values.service.api.port | default 8080 }}
+  URL: http://{{ include "bind-api.fullname" . }}-api.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.api.port | default 8080 }}
+{{- end }}
+{{- else }}
+Internal API:
+  Service: {{ include "bind-api.fullname" . }}-api
+  Port: {{ .Values.service.api.port | default 8080 }}
+  URL: http://{{ include "bind-api.fullname" . }}-api.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.api.port | default 8080 }}
 {{- end }}
 
 === Initial Setup ===
@@ -46,6 +67,7 @@ Internal API:
 
 === PostgreSQL ===
 
+{{- if .Values.postgresql }}
 {{- if .Values.postgresql.enabled }}
 PostgreSQL is deployed within the cluster:
   Host: {{ include "bind-api.fullname" . }}-postgresql
@@ -54,6 +76,11 @@ PostgreSQL is deployed within the cluster:
   User: {{ .Values.postgresql.auth.username }}
 {{- else }}
 Using external PostgreSQL as configured in values
+{{- end }}
+{{- else }}
+PostgreSQL is deployed within the cluster:
+  Host: {{ include "bind-api.fullname" . }}-postgresql
+  Port: 5432
 {{- end }}
 
 === BIND 9 Container ===
@@ -65,9 +92,22 @@ BIND 9 is running as a sidecar container in the same pod:
 
 === Monitoring ===
 
+{{- if .Values.monitoring }}
+{{- if .Values.monitoring.serviceMonitor }}
 {{- if .Values.monitoring.serviceMonitor.enabled }}
 Prometheus ServiceMonitor is enabled. Metrics available at:
-  /metrics endpoint on port {{ .Values.service.api.port }}
+  /metrics endpoint on port {{ .Values.service.api.port | default 8080 }}
+{{- else }}
+Metrics available at:
+  /metrics endpoint on port {{ .Values.service.api.port | default 8080 }}
+{{- end }}
+{{- else }}
+Metrics available at:
+  /metrics endpoint on port {{ .Values.service.api.port | default 8080 }}
+{{- end }}
+{{- else }}
+Metrics available at:
+  /metrics endpoint on port {{ .Values.service.api.port | default 8080 }}
 {{- end }}
 
 === Next Steps ===
