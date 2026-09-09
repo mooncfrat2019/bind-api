@@ -1,4 +1,6 @@
-{{- if and .Values.monitoring.enabled .Values.monitoring.serviceMonitor.enabled }}
+{{- if .Values.monitoring }}
+{{- if and .Values.monitoring.enabled .Values.monitoring.serviceMonitor }}
+{{- if .Values.monitoring.serviceMonitor.enabled }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -21,4 +23,6 @@ spec:
   namespaceSelector:
     matchNames:
       - {{ .Release.Namespace }}
+{{- end }}
+{{- end }}
 {{- end }}

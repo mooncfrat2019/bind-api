@@ -1,3 +1,4 @@
+{{- if .Values.rbac }}
 {{- if .Values.rbac.create }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -32,4 +33,5 @@ roleRef:
   kind: Role
   name: {{ include "bind-api.fullname" . }}-role
   apiGroup: rbac.authorization.k8s.io
+{{- end }}
 {{- end }}

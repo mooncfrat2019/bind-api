@@ -46,6 +46,12 @@ service:
 ingress:
   enabled: false
 
+serviceAccount:
+  create: true
+
+rbac:
+  create: true
+
 monitoring:
   enabled: false
 

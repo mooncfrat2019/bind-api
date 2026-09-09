@@ -1,3 +1,4 @@
+{{- if .Values.pdb }}
 {{- if .Values.pdb.enabled }}
 {{- if eq .Values.role "master" }}
 apiVersion: policy/v1
@@ -31,5 +32,6 @@ spec:
     matchLabels:
       {{- include "bind-api.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: replica
+{{- end }}
 {{- end }}
 {{- end }}
