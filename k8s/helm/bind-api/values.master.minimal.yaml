@@ -57,3 +57,40 @@ monitoring:
 
 pdb:
   enabled: false
+
+# Секция master
+master:
+  url: ""
+
+# Секция bind
+bind:
+  image:
+    repository: ubuntu/bind9
+    tag: "9.18"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# Секция probes
+probes:
+  liveness:
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+# Секция securityContext
+securityContext:
+  runAsUser: 0
+  runAsGroup: 0
+  fsGroup: 0
