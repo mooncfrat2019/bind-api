@@ -15,16 +15,12 @@ postgresql:
     persistence:
       enabled: true
       size: 5Gi
-      storageClass: openebs-hostpath
-      createPV: true  # Создать PV вручную
-      hostPath: "/var/openebs/bind-postgresql"
+      storageClass: standard  # Изменить на storage class без WaitForFirstConsumer
 
 zonesStorage:
   enabled: true
   size: 10Gi
-  storageClass: openebs-hostpath
-  createPV: true  # Создать PV вручную
-  hostPath: "/var/openebs/bind-zones"
+  storageClass: standard  # Изменить на storage class без WaitForFirstConsumer
 
 secrets:
   postgresPassword: "test-bindapi-password"
