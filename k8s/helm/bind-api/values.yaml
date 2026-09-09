@@ -14,7 +14,7 @@ image:
 bind:
   image:
     repository: ubuntu/bind9
-    tag: "9.18"
+    tag: "latest"
     pullPolicy: IfNotPresent
   # Конфигурация BIND
   config:
