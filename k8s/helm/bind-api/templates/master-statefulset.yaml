@@ -30,6 +30,38 @@ spec:
       securityContext:
         {{- toYaml .Values.securityContext | nindent 8 }}
       initContainers:
+        - name: init-config
+          image: "{{ .Values.bind.image.repository }}:{{ .Values.bind.image.tag }}"
+          imagePullPolicy: {{ .Values.bind.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              cp /etc/named.conf.init /etc/named.conf
+              cp /etc/named.zones.conf.init /etc/named.zones.conf
+              chown root:named /etc/named.conf /etc/named.zones.conf
+              chmod 640 /etc/named.conf /etc/named.zones.conf
+              mkdir -p /var/named
+              chown -R root:named /var/named
+              chmod 775 /var/named
+              echo "Config initialized"
+          volumeMounts:
+            - name: named-conf-src
+              mountPath: /etc/named.conf.init
+              subPath: named.conf
+            - name: named-zones-conf-src
+              mountPath: /etc/named.zones.conf.init
+              subPath: named.zones.conf
+            - name: named-conf
+              mountPath: /etc/named.conf
+              subPath: named.conf
+            - name: named-zones-conf
+              mountPath: /etc/named.zones.conf
+              subPath: named.zones.conf
+            - name: bind-zones-storage
+              mountPath: /var/named
+          securityContext:
+            runAsUser: 0
         - name: init-permissions
           image: "{{ .Values.bind.image.repository }}:{{ .Values.bind.image.tag }}"
           imagePullPolicy: {{ .Values.bind.image.pullPolicy }}
@@ -37,9 +69,6 @@ spec:
             - /bin/sh
             - -c
             - |
-              mkdir -p /var/named
-              chown -R 0:0 /var/named
-              chmod 775 /var/named
               echo "Permissions initialized"
           volumeMounts:
             - name: bind-zones-storage
@@ -177,18 +206,22 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       volumes:
-        - name: named-conf
+        - name: named-conf-src
           configMap:
             name: {{ include "bind-api.fullname" . }}-config
             items:
               - key: named.conf
                 path: named.conf
-        - name: named-zones-conf
+        - name: named-zones-conf-src
           configMap:
             name: {{ include "bind-api.fullname" . }}-config
             items:
               - key: named.zones.conf
                 path: named.zones.conf
+        - name: named-conf
+          emptyDir: {}
+        - name: named-zones-conf
+          emptyDir: {}
         - name: rndc-key
           secret:
             secretName: {{ include "bind-api.fullname" . }}-secrets
