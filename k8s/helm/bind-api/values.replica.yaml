@@ -1,0 +1,29 @@
+# Values для REPLICA роли
+
+role: replica
+
+replicaCount:
+  master: 0
+  replica: 2
+
+# PostgreSQL не нужен для реплик
+postgresql:
+  enabled: false
+
+# URL мастера (ОБЯЗАТЕЛЬНО укажите)
+master:
+  url: "https://bind-api-master.bind-dns.svc.cluster.local:8080"
+
+# Ресурсы для реплик
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+# Интервал синхронизации
+config:
+  sync:
+    interval: 30

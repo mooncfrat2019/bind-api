@@ -1,0 +1,27 @@
+{{- if eq .Values.role "master" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bind-api.fullname" . }}-master
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "bind-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: master
+spec:
+  clusterIP: None
+  selector:
+    {{- include "bind-api.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: master
+  ports:
+    - port: {{ include "bind-api.apiPort" . }}
+      targetPort: api
+      name: api
+    - port: 53
+      targetPort: dns-tcp
+      name: dns-tcp
+      protocol: TCP
+    - port: 53
+      targetPort: dns-udp
+      name: dns-udp
+      protocol: UDP
+{{- end }}

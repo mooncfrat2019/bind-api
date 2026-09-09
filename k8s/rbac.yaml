@@ -1,0 +1,26 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: bind-api-role
+  namespace: bind-dns
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bind-api-rolebinding
+  namespace: bind-dns
+subjects:
+  - kind: ServiceAccount
+    name: bind-api-sa
+    namespace: bind-dns
+roleRef:
+  kind: Role
+  name: bind-api-role
+  apiGroup: rbac.authorization.k8s.io

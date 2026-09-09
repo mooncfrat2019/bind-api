@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "bind-api.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "bind-api.labels" . | nindent 4 }}
+data:
+  # Основной конфиг BIND
+  named.conf: |
+    options {
+        directory "/var/named";
+        pid-file "/var/named/named.pid";
+
+        // Разрешаем рекурсию для внутренних клиентов
+        allow-recursion {{ include "bind-api.bindAllowRecursion" . }};
+
+        // Разрешаем трансферы зон только репликам
+        allow-transfer {{ include "bind-api.bindAllowTransfer" . }};
+
+        // Слушаем все интерфейсы
+        listen-on port 53 { {{ range .Values.bind.config.listenOn }}{{ . }}; {{ end }} };
+        listen-on-v6 port 53 { {{ range .Values.bind.config.listenOnV6 }}{{ . }}; {{ end }} };
+
+        // RNDC
+        controls {
+            inet 127.0.0.1 port 953 allow { 127.0.0.1; } keys { "rndc-key"; };
+        };
+
+        // Логирование
+        querylog yes;
+    };
+
+    key "rndc-key" {
+        algorithm hmac-sha256;
+        secret "{{ .Values.secrets.rndcKeySecret }}";
+    };
+
+    // Включение динамических зон
+    include "/etc/named.zones.conf";
+
+  # Конфиг зон (динамически обновляется API)
+  named.zones.conf: |
+    // Зоны управляются через BIND-API
+    // Не редактировать вручную
+
+  # Переменные окружения приложения
+  APP_ROLE: {{ .Values.role | quote }}
+  API_PORT: {{ .Values.config.apiPort | quote }}
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+
+  # Настройки очереди
+  MAX_QUEUE_SIZE: {{ .Values.config.queue.maxSize | quote }}
+  WORKER_TIMEOUT: {{ .Values.config.queue.workerTimeout | quote }}
+  BATCH_SIZE: {{ .Values.config.queue.batchSize | quote }}
+  BATCH_INTERVAL: {{ .Values.config.queue.batchInterval | quote }}
+  QUEUE_THRESHOLD_LOW: {{ .Values.config.queue.thresholdLow | quote }}
+  QUEUE_THRESHOLD_HIGH: {{ .Values.config.queue.thresholdHigh | quote }}
+  RELOAD_INTERVAL: {{ .Values.config.queue.reloadInterval | quote }}
+
+  # Настройки синхронизации
+  SYNC_CLEANUP_INTERVAL: {{ .Values.config.sync.cleanupInterval | quote }}
+  SYNC_API_SUBNET: {{ .Values.config.sync.subnet | quote }}
+  SYNC_INTERVAL: {{ .Values.config.sync.interval | quote }}
+  ALLOW_INSECURE_SYNC: {{ .Values.config.sync.allowInsecure | quote }}
+
+  # Пути
+  BIND_ZONE_DIR: "/var/named/"
+  BIND_NAMED_CONF: "/etc/named.conf"
+
+  # PostgreSQL (если включён)
+  {{- if .Values.postgresql.enabled }}
+  BIND_API_DB_HOST: {{ include "bind-api.postgresqlHost" . | quote }}
+  BIND_API_DB_PORT: "5432"
+  BIND_API_DB_USER: {{ .Values.postgresql.auth.username | quote }}
+  BIND_API_DB_NAME: {{ .Values.postgresql.auth.database | quote }}
+  BIND_API_DB_SSLMODE: "disable"
+  {{- end }}

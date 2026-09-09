@@ -1,0 +1,30 @@
+# Values для MASTER роли
+
+role: master
+
+replicaCount:
+  master: 1
+  replica: 0
+
+postgresql:
+  enabled: true
+
+# Мастер не нуждается в MASTER_URL
+master:
+  url: ""
+
+# Увеличенные ресурсы для мастера
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+# Включаем ServiceMonitor для метрик
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    interval: 30s

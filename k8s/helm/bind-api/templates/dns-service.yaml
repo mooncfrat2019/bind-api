@@ -1,0 +1,59 @@
+# DNS Service - внешний доступ (LoadBalancer/NodePort)
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bind-api.fullname" . }}-dns-external
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "bind-api.labels" . | nindent 4 }}
+  {{- with .Values.service.dns.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.dns.type }}
+  {{- if eq .Values.service.dns.type "LoadBalancer" }}
+  externalTrafficPolicy: {{ .Values.service.dns.externalTrafficPolicy }}
+  {{- end }}
+  {{- if eq .Values.service.dns.type "NodePort" }}
+  externalTrafficPolicy: {{ .Values.service.dns.externalTrafficPolicy }}
+  {{- end }}
+  selector:
+    {{- include "bind-api.selectorLabels" . | nindent 4 }}
+  ports:
+    - port: 53
+      {{- if eq .Values.service.dns.type "NodePort" }}
+      nodePort: {{ .Values.service.dns.nodePort }}
+      {{- end }}
+      targetPort: dns-tcp
+      name: dns-tcp
+      protocol: TCP
+    - port: 53
+      {{- if eq .Values.service.dns.type "NodePort" }}
+      nodePort: {{ .Values.service.dns.nodePort }}
+      {{- end }}
+      targetPort: dns-udp
+      name: dns-udp
+      protocol: UDP
+---
+# DNS Service - внутренний доступ (ClusterIP)
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bind-api.fullname" . }}-dns-internal
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "bind-api.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "bind-api.selectorLabels" . | nindent 4 }}
+  ports:
+    - port: 53
+      targetPort: dns-tcp
+      name: dns-tcp
+      protocol: TCP
+    - port: 53
+      targetPort: dns-udp
+      name: dns-udp
+      protocol: UDP

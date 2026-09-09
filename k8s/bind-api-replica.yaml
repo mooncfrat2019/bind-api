@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: bind-api-replica
+  namespace: bind-dns
+spec:
+  serviceName: bind-api-replica
+  replicas: 2
+  selector:
+    matchLabels:
+      app: bind-api
+      role: replica
+  template:
+    metadata:
+      labels:
+        app: bind-api
+        role: replica
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: bind-api-sa
+      securityContext:
+        runAsUser: 0
+        fsGroup: 0
+      containers:
+        - name: bind-api
+          image: bind-api:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: api
+            - containerPort: 53
+              name: dns-tcp
+              protocol: TCP
+            - containerPort: 53
+              name: dns-udp
+              protocol: UDP
+          env:
+            - name: APP_ROLE
+              value: "replica"
+            - name: MASTER_URL
+              value: "http://bind-api-master-0.bind-api-master.bind-dns.svc.cluster.local:8080"
+            - name: MASTER_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: bind-secrets
+                  key: MASTER_API_TOKEN
+            - name: SYNC_INTERVAL
+              value: "30"
+            - name: API_PORT
+              value: ":8080"
+          envFrom:
+            - configMapRef:
+                name: bind-config
+          volumeMounts:
+            - name: bind-config
+              mountPath: /etc/named.conf
+              subPath: named.conf
+            - name: bind-zones-config
+              mountPath: /etc/named.zones.conf
+              subPath: named.zones.conf
+            - name: bind-zones-storage
+              mountPath: /var/named
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        - name: bind-config
+          configMap:
+            name: bind-config
+            items:
+              - key: named.conf
+                path: named.conf
+        - name: bind-zones-config
+          configMap:
+            name: bind-config
+            items:
+              - key: named.zones.conf
+                path: named.zones.conf
+        - name: bind-zones-storage
+          persistentVolumeClaim:
+            claimName: bind-zones-pvc

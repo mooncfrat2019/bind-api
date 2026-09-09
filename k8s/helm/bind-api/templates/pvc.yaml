@@ -1,0 +1,19 @@
+{{- if .Values.zonesStorage.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "bind-api.fullname" . }}-zones-pvc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "bind-api.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.zonesStorage.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.zonesStorage.size }}
+  {{- $storageClass := include "bind-api.storageClass" . }}
+  {{- if $storageClass }}
+  storageClassName: {{ $storageClass }}
+  {{- end }}
+{{- end }}

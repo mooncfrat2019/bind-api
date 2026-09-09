@@ -1,0 +1,95 @@
+Thank you for installing {{ .Chart.Name }}!
+
+Release Name: {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+Role: {{ .Values.role }}
+
+=== DNS Access ===
+
+Internal DNS (within cluster):
+  Service: {{ include "bind-api.fullname" . }}-dns-internal
+  Port: 53
+  Use in CoreDNS configuration or pod DNS settings
+
+External DNS:
+{{- if eq .Values.service.dns.type "LoadBalancer" }}
+  Get the external IP with:
+    kubectl get svc -n {{ .Release.Namespace }} {{ include "bind-api.fullname" . }}-dns-external
+  Wait for EXTERNAL-IP to be assigned, then use that IP as your DNS server
+{{- else if eq .Values.service.dns.type "NodePort" }}
+  Access via any node IP on port: {{ .Values.service.dns.nodePort }}
+{{- end }}
+
+=== API Access ===
+
+{{- if .Values.ingress.enabled }}
+API URL: https://{{ (index .Values.ingress.hosts 0).host }}
+{{- else }}
+Internal API:
+  Service: {{ include "bind-api.fullname" . }}-api
+  Port: {{ .Values.service.api.port }}
+  URL: http://{{ include "bind-api.fullname" . }}-api.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.api.port }}
+{{- end }}
+
+=== Initial Setup ===
+
+1. Get your bootstrap API key:
+   kubectl get secret -n {{ .Release.Namespace }} {{ include "bind-api.fullname" . }}-secrets -o jsonpath='{.data.BIND_API_BOOTSTRAP_KEY}' | base64 -d
+
+2. Create your first API key:
+   curl -X POST "<API_URL>/api/keys" \
+     -H "Content-Type: application/json" \
+     -H "X-API-Key: <BOOTSTRAP_KEY>" \
+     -d '{"name":"admin","permissions":["*"],"expiresIn":8760}'
+
+3. IMPORTANT: Revoke the bootstrap key after creating your permanent key!
+
+=== PostgreSQL ===
+
+{{- if .Values.postgresql.enabled }}
+PostgreSQL is deployed within the cluster:
+  Host: {{ include "bind-api.fullname" . }}-postgresql
+  Port: 5432
+  Database: {{ .Values.postgresql.auth.database }}
+  User: {{ .Values.postgresql.auth.username }}
+{{- else }}
+Using external PostgreSQL as configured in values
+{{- end }}
+
+=== BIND 9 Container ===
+
+BIND 9 is running as a sidecar container in the same pod:
+  - Shares /var/named volume with BIND-API
+  - Listens on port 53 (DNS) and 953 (RNDC)
+  - Configured via ConfigMap and updated by BIND-API
+
+=== Monitoring ===
+
+{{- if .Values.monitoring.serviceMonitor.enabled }}
+Prometheus ServiceMonitor is enabled. Metrics available at:
+  /metrics endpoint on port {{ .Values.service.api.port }}
+{{- end }}
+
+=== Next Steps ===
+
+1. Create your first DNS zone:
+   curl -X POST "<API_URL>/api/write/zone" \
+     -H "Content-Type: application/json" \
+     -H "X-API-Key: <YOUR_API_KEY>" \
+     -d '{"name":"example.com","email":"admin@example.com","nsIP":"192.168.1.10"}'
+
+2. Add DNS records:
+   curl -X POST "<API_URL>/api/write/zone/example.com/record" \
+     -H "Content-Type: application/json" \
+     -H "X-API-Key: <YOUR_API_KEY>" \
+     -d '{"name":"www","type":"A","value":"192.168.1.100","ttl":3600}'
+
+3. For replica deployment, install with values.replica.yaml:
+   helm install bind-api-replica ./bind-api -f values.replica.yaml
+
+=== Security Reminders ===
+
+⚠️  Change all default secrets before production use!
+⚠️  Revoke bootstrap key after initial setup!
+⚠️  Enable HTTPS/TLS for API access!
+⚠️  Restrict SYNC_API_SUBNET to your network!

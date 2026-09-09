@@ -1,0 +1,35 @@
+{{- if .Values.pdb.enabled }}
+{{- if eq .Values.role "master" }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "bind-api.fullname" . }}-master-pdb
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "bind-api.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.pdb.minAvailable }}
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "bind-api.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: master
+{{- else if eq .Values.role "replica" }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "bind-api.fullname" . }}-replica-pdb
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "bind-api.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.pdb.minAvailable }}
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "bind-api.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: replica
+{{- end }}
+{{- end }}

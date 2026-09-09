@@ -1,0 +1,144 @@
+# Headless service для master StatefulSet
+apiVersion: v1
+kind: Service
+metadata:
+  name: bind-api-master
+  namespace: bind-dns
+  labels:
+    app: bind-api
+    role: master
+spec:
+  clusterIP: None
+  selector:
+    app: bind-api
+    role: master
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: api
+    - port: 53
+      targetPort: 53
+      name: dns-tcp
+      protocol: TCP
+    - port: 53
+      targetPort: 53
+      name: dns-udp
+      protocol: UDP
+---
+# Headless service для replica StatefulSet
+apiVersion: v1
+kind: Service
+metadata:
+  name: bind-api-replica
+  namespace: bind-dns
+  labels:
+    app: bind-api
+    role: replica
+spec:
+  clusterIP: None
+  selector:
+    app: bind-api
+    role: replica
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: api
+    - port: 53
+      targetPort: 53
+      name: dns-tcp
+      protocol: TCP
+    - port: 53
+      targetPort: 53
+      name: dns-udp
+      protocol: UDP
+---
+# Service для внутреннего доступа к API
+apiVersion: v1
+kind: Service
+metadata:
+  name: bind-api-internal
+  namespace: bind-dns
+  labels:
+    app: bind-api
+spec:
+  type: ClusterIP
+  selector:
+    app: bind-api
+    role: master
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: api
+---
+# Service для DNS (внутренний)
+apiVersion: v1
+kind: Service
+metadata:
+  name: bind-dns-internal
+  namespace: bind-dns
+  labels:
+    app: bind-dns
+spec:
+  type: ClusterIP
+  selector:
+    app: bind-api
+  ports:
+    - port: 53
+      targetPort: 53
+      name: dns-tcp
+      protocol: TCP
+    - port: 53
+      targetPort: 53
+      name: dns-udp
+      protocol: UDP
+---
+# Service для DNS (внешний - LoadBalancer)
+apiVersion: v1
+kind: Service
+metadata:
+  name: bind-dns-external
+  namespace: bind-dns
+  labels:
+    app: bind-dns
+  annotations:
+    # Для cloud-провайдеров
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector:
+    app: bind-api
+  ports:
+    - port: 53
+      targetPort: 53
+      name: dns-tcp
+      protocol: TCP
+    - port: 53
+      targetPort: 53
+      name: dns-udp
+      protocol: UDP
+---
+# NodePort альтернатива для bare-metal
+apiVersion: v1
+kind: Service
+metadata:
+  name: bind-dns-nodeport
+  namespace: bind-dns
+  labels:
+    app: bind-dns
+spec:
+  type: NodePort
+  externalTrafficPolicy: Local
+  selector:
+    app: bind-api
+  ports:
+    - port: 53
+      targetPort: 53
+      nodePort: 30053
+      name: dns-tcp
+      protocol: TCP
+    - port: 53
+      targetPort: 53
+      nodePort: 30053
+      name: dns-udp
+      protocol: UDP

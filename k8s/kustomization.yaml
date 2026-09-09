@@ -1,0 +1,45 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: bind-dns
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secrets.yaml
+  - pv-pvc.yaml
+  - postgresql.yaml
+  - bind-api-master.yaml
+  - bind-api-replica.yaml
+  - services.yaml
+  - ingress.yaml
+  - rbac.yaml
+
+commonLabels:
+  app: bind-dns
+  managed-by: kustomize
+
+configMapGenerator:
+  - name: bind-config-extra
+    literals:
+      - LOG_LEVEL=INFO
+
+secretGenerator:
+  - name: bind-secrets-extra
+    type: Opaque
+    literals:
+      - POSTGRES_PASSWORD=CHANGE_ME_SECURE_PASSWORD_123
+      - BIND_API_BOOTSTRAP_KEY=bootstrap-key-change-me-immediately-32chars
+      - SYNC_API_TOKEN=secure-sync-token-between-master-replica
+
+replacements:
+  - source:
+      kind: Secret
+      name: bind-secrets
+      fieldPath: data.POSTGRES_PASSWORD
+    targets:
+      - select:
+          kind: ConfigMap
+          name: bind-config
+        fieldPaths:
+          - data.app-config.env
