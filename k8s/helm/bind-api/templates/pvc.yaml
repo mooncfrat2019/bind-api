@@ -1,40 +1,5 @@
-{{- if and .Values.zonesStorage.enabled (eq .Values.role "master") }}
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: {{ include "bind-api.fullname" . }}-zones-pvc
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "bind-api.labels" . | nindent 4 }}
-    app.kubernetes.io/component: master
-spec:
-  accessModes:
-    {{- toYaml .Values.zonesStorage.accessModes | nindent 4 }}
-  resources:
-    requests:
-      storage: {{ .Values.zonesStorage.size }}
-  {{- if .Values.zonesStorage.storageClass }}
-  storageClassName: {{ .Values.zonesStorage.storageClass }}
-  {{- end }}
-{{- end }}
----
-{{- if and .Values.postgresql.enabled (eq .Values.role "master") }}
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: data-{{ include "bind-api.fullname" . }}-postgresql-0
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "bind-api.labels" . | nindent 4 }}
-    app.kubernetes.io/component: postgresql
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: {{ .Values.postgresql.primary.persistence.size }}
-  {{- if .Values.postgresql.primary.persistence.storageClass }}
-  storageClassName: {{ .Values.postgresql.primary.persistence.storageClass }}
-  {{- end }}
-{{- end }}
+{{- /*
+  PVC для StatefulSet создаются автоматически через volumeClaimTemplates.
+  Этот файл оставлен пустым для совместимости.
+  Не удаляйте файл, так как он может использоваться в скриптах развёртывания.
+*/ -}}

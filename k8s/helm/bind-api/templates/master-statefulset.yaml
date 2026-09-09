@@ -30,7 +30,6 @@ spec:
       securityContext:
         {{- toYaml .Values.securityContext | nindent 8 }}
       initContainers:
-        # Инициализация прав доступа к файлам
         - name: init-permissions
           image: "{{ .Values.bind.image.repository }}:{{ .Values.bind.image.tag }}"
           imagePullPolicy: {{ .Values.bind.image.pullPolicy }}
@@ -62,7 +61,7 @@ spec:
           securityContext:
             runAsUser: 0
       containers:
-        # === КОНТЕЙНЕР BIND 9 ===
+        # === BIND 9 ===
         - name: bind9
           image: "{{ .Values.bind.image.repository }}:{{ .Values.bind.image.tag }}"
           imagePullPolicy: {{ .Values.bind.image.pullPolicy }}
@@ -119,7 +118,7 @@ spec:
               add:
                 - NET_BIND_SERVICE
 
-        # === КОНТЕЙНЕР BIND-API ===
+        # === BIND-API ===
         - name: bind-api
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -217,7 +216,6 @@ spec:
             items:
               - key: RNDC_KEY_SECRET
                 path: rndc.key
-        # EmptyDir для синхронизации конфигов между контейнерами
         - name: etc-named
           emptyDir: {}
         - name: etc-zones
