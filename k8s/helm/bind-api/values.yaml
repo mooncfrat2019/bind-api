@@ -85,131 +85,19 @@ zonesStorage:
   storageClass: ""
   accessModes:
     - ReadWriteOnce
+  # Создать PV вручную (для OpenEBS hostpath)
+  createPV: false
+  hostPath: ""  # Путь на узле для hostPath PV
 
-# === Сервисы ===
-service:
-  dns:
-    # Тип сервиса для DNS: ClusterIP, LoadBalancer, NodePort
-    type: LoadBalancer
-    # Для NodePort
-    nodePort: 30053
-    # External traffic policy
-    externalTrafficPolicy: Local
-    # Annotations для cloud-провайдеров
-    annotations: {}
-
-  api:
-    type: ClusterIP
-    port: 8080
-
-# === Ingress ===
-ingress:
+# === PostgreSQL ===
+postgresql:
   enabled: true
-  className: nginx
-  annotations:
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
-  hosts:
-    - host: bind-api.example.com
-      paths:
-        - path: /
-          pathType: Prefix
-  tls: []
-
-# === Конфигурация приложения ===
-config:
-  # Уровень логирования: DEBUG, INFO, WARN, ERROR
-  logLevel: INFO
-
-  # Порт API
-  apiPort: ":8080"
-
-  # Настройки очереди заданий
-  queue:
-    maxSize: 1000
-    workerTimeout: 180
-    batchSize: 50
-    batchInterval: 5
-    thresholdLow: 0.1
-    thresholdHigh: 0.3
-    reloadInterval: 10
-
-  # Настройки синхронизации
-  sync:
-    cleanupInterval: "5m"
-    interval: 30
-    subnet: "10.0.0.0/8"
-    allowInsecure: false
-
-# === Секреты (ОБЯЗАТЕЛЬНО измените перед production!) ===
-secrets:
-  # PostgreSQL password
-  postgresPassword: "CHANGE_ME_SECURE_PASSWORD_123"
-
-  # Bootstrap API ключ (временный, 32-120 символов)
-  bootstrapKey: "CHANGE_ME_BOOTSTRAP_KEY_MIN_32_CHARS_LONG"
-
-  # Токен синхронизации между мастером и репликами
-  syncToken: "CHANGE_ME_SYNC_TOKEN_SECURE_VALUE_HERE"
-
-  # Токен для реплик (для подключения к мастеру)
-  masterApiToken: "CHANGE_ME_MASTER_API_TOKEN_VALUE"
-
-  # RNDC ключ (base64, сгенерируйте: rndc-confgen -a -c /etc/rndc.key)
-  rndcKeySecret: "cm5kYy1zZWNyZXQta2V5LWJhc2U2NAo="
-
-# === Мастер URL (для реплик) ===
-master:
-  url: ""
-
-# === ServiceAccount ===
-serviceAccount:
-  create: true
-  name: ""
-  annotations: {}
-
-# === RBAC ===
-rbac:
-  create: true
-
-# === Pod Disruption Budget ===
-pdb:
-  enabled: true
-  minAvailable: 1
-
-# === Monitoring (Prometheus Operator) ===
-monitoring:
-  enabled: true
-  serviceMonitor:
-    enabled: false
-    interval: 30s
-    scrapeTimeout: 10s
-    labels: {}
-
-# === Affinity и tolerations ===
-affinity: {}
-nodeSelector: {}
-tolerations: []
-
-# === Security Context ===
-securityContext:
-  runAsUser: 0
-  runAsGroup: 0
-  fsGroup: 0
-
-# === Probe настройки ===
-probes:
-  liveness:
-    initialDelaySeconds: 30
-    periodSeconds: 10
-    timeoutSeconds: 5
-    failureThreshold: 3
-  readiness:
-    initialDelaySeconds: 10
-    periodSeconds: 5
-    timeoutSeconds: 3
-    failureThreshold: 3
-
-# === Дополнительные volume mounts ===
-extraVolumeMounts: []
-extraVolumes: []
+  # ...
+  primary:
+    persistence:
+      enabled: true
+      size: 5Gi
+      storageClass: ""
+      # Создать PV вручную (для OpenEBS hostpath)
+      createPV: false
+      hostPath: ""  # Путь на узле для hostPath PV

@@ -16,11 +16,15 @@ postgresql:
       enabled: true
       size: 5Gi
       storageClass: openebs-hostpath
+      createPV: true  # Создать PV вручную
+      hostPath: "/var/openebs/bind-postgresql"
 
 zonesStorage:
   enabled: true
   size: 10Gi
   storageClass: openebs-hostpath
+  createPV: true  # Создать PV вручную
+  hostPath: "/var/openebs/bind-zones"
 
 secrets:
   postgresPassword: "test-bindapi-password"
