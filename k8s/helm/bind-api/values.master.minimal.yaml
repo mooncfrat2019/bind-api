@@ -6,6 +6,7 @@ replicaCount:
 
 postgresql:
   enabled: true
+  fullnameOverride: bind-api-master-postgresql  # Явно задаём имя
   auth:
     postgresPassword: "test-superuser-password"
     username: bindapi

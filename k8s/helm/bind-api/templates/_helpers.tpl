@@ -104,7 +104,7 @@ PostgreSQL host
 */}}
 {{- define "bind-api.postgresqlHost" -}}
 {{- if .Values.postgresql.enabled }}
-{{- printf "%s-postgresql.%s.svc.cluster.local" .Release.Name .Release.Namespace }}
+{{- printf "%s-postgresql" .Release.Name }}
 {{- else }}
 {{- if .Values.externalPostgresql }}
 {{- .Values.externalPostgresql.host }}

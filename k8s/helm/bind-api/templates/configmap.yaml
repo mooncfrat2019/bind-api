@@ -13,10 +13,10 @@ data:
         pid-file "/var/named/named.pid";
 
         // Разрешаем рекурсию для внутренних клиентов
-        allow-recursion {{ include "bind-api.bindAllowRecursion" . }};
+        allow-recursion { 10.0.0.0/8; 172.16.0.0/12; 192.168.0.0/16; };
 
         // Разрешаем трансферы зон только репликам
-        allow-transfer {{ include "bind-api.bindAllowTransfer" . }};
+        allow-transfer { 10.0.0.0/8; };
 
         // Слушаем все интерфейсы
         listen-on port 53 { any; };
@@ -109,6 +109,3 @@ data:
   BIND_API_DB_NAME: {{ .Values.postgresql.auth.database | quote }}
   BIND_API_DB_SSLMODE: "disable"
   {{- end }}
-
-  # Роль сервера
-  APP_ROLE: {{ .Values.role | default "master" | quote }}
