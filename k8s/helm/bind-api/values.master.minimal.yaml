@@ -15,12 +15,12 @@ postgresql:
     persistence:
       enabled: true
       size: 5Gi
-      storageClass: openebs-hostpath-immediate  # Изменить на storage class без WaitForFirstConsumer
+      storageClass: openebs-hostpath
 
 zonesStorage:
   enabled: true
   size: 10Gi
-  storageClass: openebs-hostpath-immediate  # Изменить на storage class без WaitForFirstConsumer
+  storageClass: openebs-hostpath
 
 secrets:
   postgresPassword: "test-bindapi-password"
