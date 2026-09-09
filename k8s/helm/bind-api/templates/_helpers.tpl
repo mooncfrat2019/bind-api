@@ -104,7 +104,11 @@ PostgreSQL host
 */}}
 {{- define "bind-api.postgresqlHost" -}}
 {{- if .Values.postgresql.enabled }}
+{{- if .Values.postgresql.fullnameOverride }}
+{{- .Values.postgresql.fullnameOverride }}
+{{- else }}
 {{- printf "%s-postgresql" .Release.Name }}
+{{- end }}
 {{- else }}
 {{- if .Values.externalPostgresql }}
 {{- .Values.externalPostgresql.host }}

@@ -1,0 +1,40 @@
+{{- if and .Values.postgresql.enabled (eq .Values.role "master") }}
+---
+# Headless service для StatefulSet
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bind-api.fullname" . }}-postgresql
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "bind-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+spec:
+  clusterIP: None
+  selector:
+    {{- include "bind-api.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+  ports:
+    - port: 5432
+      targetPort: postgres
+      name: postgres
+---
+# ClusterIP service для доступа
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bind-api.fullname" . }}-postgresql-hl
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "bind-api.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "bind-api.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+  ports:
+    - port: 5432
+      targetPort: postgres
+      name: postgres
+{{- end }}

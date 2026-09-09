@@ -78,6 +78,8 @@ spec:
             - name: rndc-key
               mountPath: /etc/rndc.key
               subPath: rndc.key
+            - name: run-named
+              mountPath: /run/named
           resources:
             {{- toYaml .Values.bind.resources | nindent 12 }}
           livenessProbe:
@@ -202,6 +204,8 @@ spec:
             items:
               - key: RNDC_KEY_SECRET
                 path: rndc.key
+        - name: run-named
+          emptyDir: {}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

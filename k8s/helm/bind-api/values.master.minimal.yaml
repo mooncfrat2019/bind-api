@@ -6,7 +6,6 @@ replicaCount:
 
 postgresql:
   enabled: true
-  fullnameOverride: bind-api-master-postgresql  # Явно задаём имя
   auth:
     postgresPassword: "test-superuser-password"
     username: bindapi
@@ -74,7 +73,7 @@ master:
 
 bind:
   image:
-    repository: ubuntu/bind9
+    repository: internetsystemsconsortium/bind9
     tag: "latest"
     pullPolicy: IfNotPresent
   resources:
@@ -101,3 +100,8 @@ securityContext:
   runAsUser: 0
   runAsGroup: 0
   fsGroup: 0
+
+image:
+  repository: zix2045/bind-api
+  tag: latest
+  pullPolicy: Always
