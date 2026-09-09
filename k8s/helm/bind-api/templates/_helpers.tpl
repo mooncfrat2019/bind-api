@@ -52,10 +52,14 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 Create the name of the service account to use
 */}}
 {{- define "bind-api.serviceAccountName" -}}
+{{- if .Values.serviceAccount }}
 {{- if .Values.serviceAccount.create }}
 {{- default (include "bind-api.fullname" .) .Values.serviceAccount.name }}
 {{- else }}
 {{- default "default" .Values.serviceAccount.name }}
+{{- end }}
+{{- else }}
+{{- default "default" }}
 {{- end }}
 {{- end }}
 
@@ -63,15 +67,29 @@ Create the name of the service account to use
 Return the appropriate API port
 */}}
 {{- define "bind-api.apiPort" -}}
-{{- .Values.config.apiPort | trimPrefix ":" }}
+{{- $port := "8080" }}
+{{- if .Values.config }}
+{{- if .Values.config.apiPort }}
+{{- $port = .Values.config.apiPort | trimPrefix ":" }}
+{{- end }}
+{{- end }}
+{{- $port }}
 {{- end }}
 
 {{/*
 Return the master URL for replicas
 */}}
 {{- define "bind-api.masterUrl" -}}
+{{- if .Values.master }}
 {{- if .Values.master.url }}
 {{- .Values.master.url }}
+{{- else }}
+{{- printf "http://%s-master-0.%s-master.%s.svc.cluster.local:%s"
+  .Release.Name
+  .Release.Name
+  .Release.Namespace
+  (include "bind-api.apiPort" .) }}
+{{- end }}
 {{- else }}
 {{- printf "http://%s-master-0.%s-master.%s.svc.cluster.local:%s"
   .Release.Name
@@ -88,7 +106,11 @@ PostgreSQL host
 {{- if .Values.postgresql.enabled }}
 {{- printf "%s-postgresql.%s.svc.cluster.local" .Release.Name .Release.Namespace }}
 {{- else }}
+{{- if .Values.externalPostgresql }}
 {{- .Values.externalPostgresql.host }}
+{{- else }}
+{{- "localhost" }}
+{{- end }}
 {{- end }}
 {{- end }}
 
@@ -96,12 +118,16 @@ PostgreSQL host
 Storage class
 */}}
 {{- define "bind-api.storageClass" -}}
+{{- if .Values.global }}
 {{- if .Values.global.storageClass }}
 {{- .Values.global.storageClass }}
-{{- else if .Values.zonesStorage.storageClass }}
-{{- .Values.zonesStorage.storageClass }}
 {{- else }}
-{{- default "" }}
+{{- if .Values.zonesStorage }}
+{{- if .Values.zonesStorage.storageClass }}
+{{- .Values.zonesStorage.storageClass }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- end }}
 
@@ -110,10 +136,20 @@ BIND allow-recursion string
 */}}
 {{- define "bind-api.bindAllowRecursion" -}}
 {{- $list := list }}
+{{- if .Values.bind }}
+{{- if .Values.bind.config }}
+{{- if .Values.bind.config.allowRecursion }}
 {{- range .Values.bind.config.allowRecursion }}
 {{- $list = append $list (printf "{ %s; }" .) }}
 {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if $list }}
 {{- join "; " $list }}
+{{- else }}
+{{- "{ 10.0.0.0/8; 172.16.0.0/12; 192.168.0.0/16; }" }}
+{{- end }}
 {{- end }}
 
 {{/*
@@ -121,8 +157,18 @@ BIND allow-transfer string
 */}}
 {{- define "bind-api.bindAllowTransfer" -}}
 {{- $list := list }}
+{{- if .Values.bind }}
+{{- if .Values.bind.config }}
+{{- if .Values.bind.config.allowTransfer }}
 {{- range .Values.bind.config.allowTransfer }}
 {{- $list = append $list (printf "{ %s; }" .) }}
 {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if $list }}
 {{- join "; " $list }}
+{{- else }}
+{{- "{ 10.0.0.0/8; }" }}
+{{- end }}
 {{- end }}

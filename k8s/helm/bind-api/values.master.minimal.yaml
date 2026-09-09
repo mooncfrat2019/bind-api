@@ -35,6 +35,7 @@ secrets:
 
 config:
   logLevel: DEBUG
+  apiPort: ":8080"
 
 service:
   dns:
@@ -58,11 +59,9 @@ monitoring:
 pdb:
   enabled: false
 
-# Секция master
 master:
   url: ""
 
-# Секция bind
 bind:
   image:
     repository: ubuntu/bind9
@@ -76,7 +75,6 @@ bind:
       cpu: 500m
       memory: 512Mi
 
-# Секция probes
 probes:
   liveness:
     initialDelaySeconds: 30
@@ -89,7 +87,6 @@ probes:
     timeoutSeconds: 3
     failureThreshold: 3
 
-# Секция securityContext
 securityContext:
   runAsUser: 0
   runAsGroup: 0
