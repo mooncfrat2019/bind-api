@@ -1,0 +1,41 @@
+# k8s/helm/bind-api/values.master.minimal.yaml
+
+role: master
+
+replicaCount:
+  master: 1
+  replica: 0
+
+postgresql:
+  enabled: true
+  auth:
+    postgresPassword: "test-superuser-password"
+    username: bindapi
+    password: "test-bindapi-password"
+    database: bind_api
+
+secrets:
+  postgresPassword: "test-bindapi-password"
+  bootstrapKey: "test-bootstrap-key-min-32-chars-long-secure"
+  syncToken: "test-sync-token-value"
+  masterApiToken: "test-master-api-token"
+  rndcKeySecret: "dGVzdC1ybmRjLWtleS1iYXNlNjQtZW5jb2RlZA=="
+
+config:
+  logLevel: DEBUG
+
+service:
+  dns:
+    type: ClusterIP
+  api:
+    type: ClusterIP
+    port: 8080
+
+ingress:
+  enabled: false
+
+monitoring:
+  enabled: false
+
+pdb:
+  enabled: false
