@@ -152,6 +152,8 @@ spec:
               containerPort: {{ include "bind-api.apiPort" . }}
               protocol: TCP
           env:
+            - name: RNDC_CONF
+              value: "/etc/rndc.conf"
             - name: APP_ROLE
               value: "master"
             - name: BIND_API_DB_PASSWORD

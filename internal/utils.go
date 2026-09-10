@@ -50,7 +50,18 @@ func reloadBind() error {
 	Debug("Выполнение rndc reload...")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "rndc", "reload")
+	// Проверяем переменную окружения RNDC_CONF
+	rndcConf := os.Getenv("RNDC_CONF")
+
+	var cmd *exec.Cmd
+	if rndcConf != "" {
+		// Если RNDC_CONF задана, используем её
+		Debug("Используем RNDC_CONF: %s", rndcConf)
+		cmd = exec.CommandContext(ctx, "rndc", "-c", rndcConf, "reload")
+	} else {
+		// Иначе используем rndc без конфига (по умолчанию)
+		cmd = exec.CommandContext(ctx, "rndc", "reload")
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		Error("rndc reload output: %s, error: %v", string(out), err)
