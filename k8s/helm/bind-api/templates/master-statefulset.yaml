@@ -37,40 +37,21 @@ spec:
             - /bin/sh
             - -c
             - |
-              cp /etc/named.conf.init /etc/named.conf
-              cp /etc/named.zones.conf.init /etc/named.zones.conf
+              # Копируем конфиги из read-only volume в writable
+              cp /config/named.conf /etc/named.conf
+              cp /config/named.zones.conf /etc/named.zones.conf
               chown root:named /etc/named.conf /etc/named.zones.conf
               chmod 640 /etc/named.conf /etc/named.zones.conf
+              # Инициализируем директорию зон
               mkdir -p /var/named
               chown -R root:named /var/named
               chmod 775 /var/named
               echo "Config initialized"
           volumeMounts:
-            - name: named-conf-src
-              mountPath: /etc/named.conf.init
-              subPath: named.conf
-            - name: named-zones-conf-src
-              mountPath: /etc/named.zones.conf.init
-              subPath: named.zones.conf
-            - name: named-conf
-              mountPath: /etc/named.conf
-              subPath: named.conf
-            - name: named-zones-conf
-              mountPath: /etc/named.zones.conf
-              subPath: named.zones.conf
-            - name: bind-zones-storage
-              mountPath: /var/named
-          securityContext:
-            runAsUser: 0
-        - name: init-permissions
-          image: "{{ .Values.bind.image.repository }}:{{ .Values.bind.image.tag }}"
-          imagePullPolicy: {{ .Values.bind.image.pullPolicy }}
-          command:
-            - /bin/sh
-            - -c
-            - |
-              echo "Permissions initialized"
-          volumeMounts:
+            - name: config-src
+              mountPath: /config
+            - name: etc-config
+              mountPath: /etc
             - name: bind-zones-storage
               mountPath: /var/named
           securityContext:
@@ -97,10 +78,10 @@ spec:
           volumeMounts:
             - name: bind-zones-storage
               mountPath: /var/named
-            - name: named-conf
+            - name: etc-config
               mountPath: /etc/named.conf
               subPath: named.conf
-            - name: named-zones-conf
+            - name: etc-config
               mountPath: /etc/named.zones.conf
               subPath: named.zones.conf
             - name: rndc-key
@@ -163,10 +144,10 @@ spec:
           volumeMounts:
             - name: bind-zones-storage
               mountPath: /var/named
-            - name: named-conf
+            - name: etc-config
               mountPath: /etc/named.conf
               subPath: named.conf
-            - name: named-zones-conf
+            - name: etc-config
               mountPath: /etc/named.zones.conf
               subPath: named.zones.conf
             - name: rndc-key
@@ -206,21 +187,15 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       volumes:
-        - name: named-conf-src
+        - name: config-src
           configMap:
             name: {{ include "bind-api.fullname" . }}-config
             items:
               - key: named.conf
                 path: named.conf
-        - name: named-zones-conf-src
-          configMap:
-            name: {{ include "bind-api.fullname" . }}-config
-            items:
               - key: named.zones.conf
                 path: named.zones.conf
-        - name: named-conf
-          emptyDir: {}
-        - name: named-zones-conf
+        - name: etc-config
           emptyDir: {}
         - name: rndc-key
           secret:
