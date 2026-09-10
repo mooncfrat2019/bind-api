@@ -41,30 +41,33 @@ spec:
               cp /config-src/named.conf /config/named.conf
               cp /config-src/named.zones.conf /config/named.zones.conf
 
-              # Создаём ПРАВИЛЬНЫЙ rndc.conf для BIND-API
-              cat > /config/rndc.conf << 'RNDCEOF'
+              # Читаем ключ из Secret
+              RNDC_KEY=$(cat /rndc-src/rndc.key)
+
+              # Создаём rndc.conf для BIND-API
+              cat > /config/rndc.conf << EOF
               key "rndc-key" {
                   algorithm hmac-sha256;
-                  secret "'"$(cat /rndc-src/rndc.key)"'";
+                  secret "${RNDC_KEY}";
               };
               options {
                   default-key "rndc-key";
                   default-server 127.0.0.1;
                   default-port 953;
               };
-              RNDCEOF
+              EOF
 
-              # Создаём ПРАВИЛЬНЫЙ rndc.key для BIND
-              cat > /config/rndc.key << 'KEYEOF'
+              # Создаём rndc.key для BIND
+              cat > /config/rndc.key << EOF
               key "rndc-key" {
                   algorithm hmac-sha256;
-                  secret "'"$(cat /rndc-src/rndc.key)"'";
+                  secret "${RNDC_KEY}";
               };
-              KEYEOF
+              EOF
 
               # Устанавливаем права
-              chown root:named /config/*
-              chmod 640 /config/named.conf /config/named.zones.conf /config/rndc.key /config/rndc.conf
+              chown root:named /config/named.conf /config/named.zones.conf /config/rndc.conf /config/rndc.key
+              chmod 640 /config/named.conf /config/named.zones.conf /config/rndc.conf /config/rndc.key
 
               # Инициализируем директорию зон
               mkdir -p /var/named
