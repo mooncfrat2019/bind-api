@@ -37,35 +37,31 @@ spec:
             - /bin/sh
             - -c
             - |
-              # Копируем конфиги из read-only volume в writable
-              cp /config/named.conf /etc/named.conf
-              cp /config/named.zones.conf /etc/named.zones.conf
-              chown root:named /etc/named.conf /etc/named.zones.conf
-              chmod 640 /etc/named.conf /etc/named.zones.conf
+              # Копируем конфиги из ConfigMap в writable emptyDir
+              cp /config-src/named.conf /config/named.conf
+              cp /config-src/named.zones.conf /config/named.zones.conf
+              # Копируем RNDC ключ
+              cp /rndc-src/rndc.key /config/rndc.key
+              # Устанавливаем права
+              chown root:named /config/*
+              chmod 640 /config/named.conf /config/named.zones.conf /config/rndc.key
               # Инициализируем директорию зон
               mkdir -p /var/named
               chown -R root:named /var/named
               chmod 775 /var/named
+              # Создаём /run/named
+              mkdir -p /run/named
+              chown named:named /run/named
               echo "Config initialized"
           volumeMounts:
             - name: config-src
+              mountPath: /config-src
+            - name: rndc-src
+              mountPath: /rndc-src
+            - name: config
               mountPath: /config
-            - name: etc-config
-              mountPath: /etc
             - name: bind-zones-storage
               mountPath: /var/named
-            - name: etc-config
-              mountPath: /etc/named.conf
-              subPath: named.conf
-            - name: etc-config
-              mountPath: /etc/named.zones.conf
-              subPath: named.zones.conf
-            - name: rndc-key
-              mountPath: /etc/rndc.key
-              subPath: rndc.key
-            - name: rndc-conf
-              mountPath: /etc/rndc.conf
-              subPath: rndc.conf
             - name: run-named
               mountPath: /run/named
           securityContext:
@@ -78,7 +74,7 @@ spec:
             - /usr/sbin/named
             - -g
             - -c
-            - /etc/named.conf
+            - /config/named.conf
           ports:
             - name: dns-tcp
               containerPort: 53
@@ -92,13 +88,13 @@ spec:
           volumeMounts:
             - name: bind-zones-storage
               mountPath: /var/named
-            - name: etc-config
-              mountPath: /etc/named.conf
+            - name: config
+              mountPath: /config/named.conf
               subPath: named.conf
-            - name: etc-config
+            - name: config
               mountPath: /etc/named.zones.conf
               subPath: named.zones.conf
-            - name: rndc-key
+            - name: config
               mountPath: /etc/rndc.key
               subPath: rndc.key
             - name: run-named
@@ -158,13 +154,13 @@ spec:
           volumeMounts:
             - name: bind-zones-storage
               mountPath: /var/named
-            - name: etc-config
+            - name: config
               mountPath: /etc/named.conf
               subPath: named.conf
-            - name: etc-config
+            - name: config
               mountPath: /etc/named.zones.conf
               subPath: named.zones.conf
-            - name: rndc-key
+            - name: config
               mountPath: /etc/rndc.key
               subPath: rndc.key
             {{- with .Values.extraVolumeMounts }}
@@ -209,21 +205,16 @@ spec:
                 path: named.conf
               - key: named.zones.conf
                 path: named.zones.conf
-        - name: etc-config
-          emptyDir: { }
-        - name: rndc-key
+        - name: rndc-src
           secret:
             secretName: {{ include "bind-api.fullname" . }}-secrets
             items:
               - key: RNDC_KEY_SECRET
                 path: rndc.key
-                mode: 0640
-        - name: rndc-conf
-          configMap:
-            name: {{ include "bind-api.fullname" . }}-rndc-conf
-            defaultMode: 0640
+        - name: config
+          emptyDir: {}
         - name: run-named
-          emptyDir: { }
+          emptyDir: {}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
