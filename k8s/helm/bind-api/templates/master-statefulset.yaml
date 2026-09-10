@@ -54,6 +54,20 @@ spec:
               mountPath: /etc
             - name: bind-zones-storage
               mountPath: /var/named
+            - name: etc-config
+              mountPath: /etc/named.conf
+              subPath: named.conf
+            - name: etc-config
+              mountPath: /etc/named.zones.conf
+              subPath: named.zones.conf
+            - name: rndc-key
+              mountPath: /etc/rndc.key
+              subPath: rndc.key
+            - name: rndc-conf
+              mountPath: /etc/rndc.conf
+              subPath: rndc.conf
+            - name: run-named
+              mountPath: /run/named
           securityContext:
             runAsUser: 0
       containers:
@@ -196,15 +210,20 @@ spec:
               - key: named.zones.conf
                 path: named.zones.conf
         - name: etc-config
-          emptyDir: {}
+          emptyDir: { }
         - name: rndc-key
           secret:
             secretName: {{ include "bind-api.fullname" . }}-secrets
             items:
               - key: RNDC_KEY_SECRET
                 path: rndc.key
+                mode: 0640
+        - name: rndc-conf
+          configMap:
+            name: {{ include "bind-api.fullname" . }}-rndc-conf
+            defaultMode: 0640
         - name: run-named
-          emptyDir: {}
+          emptyDir: { }
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
