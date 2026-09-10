@@ -46,6 +46,22 @@ data:
     // Зоны управляются через BIND-API
     // Не редактировать вручную
 
+  rndc.conf: |
+    key "rndc-key" {
+        algorithm hmac-sha256;
+        secret "{{ .Values.secrets.rndcKeySecret }}";
+    };
+    options {
+        default-key "rndc-key";
+        default-server 127.0.0.1;
+        default-port 953;
+    };
+
+  rndc.key: |
+    key "rndc-key" {
+        algorithm hmac-sha256;
+        secret "{{ .Values.secrets.rndcKeySecret }}";
+    };
   # Переменные окружения приложения
   {{- if .Values.config }}
   {{- if .Values.config.logLevel }}

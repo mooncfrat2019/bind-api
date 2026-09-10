@@ -37,21 +37,44 @@ spec:
             - /bin/sh
             - -c
             - |
-              # Копируем конфиги из ConfigMap в writable emptyDir
+              # Копируем конфиги из ConfigMap
               cp /config-src/named.conf /config/named.conf
               cp /config-src/named.zones.conf /config/named.zones.conf
-              # Копируем RNDC ключ
-              cp /rndc-src/rndc.key /config/rndc.key
+
+              # Создаём ПРАВИЛЬНЫЙ rndc.conf для BIND-API
+              cat > /config/rndc.conf << 'RNDCEOF'
+              key "rndc-key" {
+                  algorithm hmac-sha256;
+                  secret "'"$(cat /rndc-src/rndc.key)"'";
+              };
+              options {
+                  default-key "rndc-key";
+                  default-server 127.0.0.1;
+                  default-port 953;
+              };
+              RNDCEOF
+
+              # Создаём ПРАВИЛЬНЫЙ rndc.key для BIND
+              cat > /config/rndc.key << 'KEYEOF'
+              key "rndc-key" {
+                  algorithm hmac-sha256;
+                  secret "'"$(cat /rndc-src/rndc.key)"'";
+              };
+              KEYEOF
+
               # Устанавливаем права
               chown root:named /config/*
-              chmod 640 /config/named.conf /config/named.zones.conf /config/rndc.key
+              chmod 640 /config/named.conf /config/named.zones.conf /config/rndc.key /config/rndc.conf
+
               # Инициализируем директорию зон
               mkdir -p /var/named
               chown -R root:named /var/named
               chmod 775 /var/named
+
               # Создаём /run/named
               mkdir -p /run/named
               chown named:named /run/named
+
               echo "Config initialized"
           volumeMounts:
             - name: config-src
@@ -163,6 +186,9 @@ spec:
             - name: config
               mountPath: /etc/rndc.key
               subPath: rndc.key
+            - name: config
+              mountPath: /etc/rndc.conf
+              subPath: rndc.conf
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -212,9 +238,9 @@ spec:
               - key: RNDC_KEY_SECRET
                 path: rndc.key
         - name: config
-          emptyDir: {}
+          emptyDir: { }
         - name: run-named
-          emptyDir: {}
+          emptyDir: { }
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
