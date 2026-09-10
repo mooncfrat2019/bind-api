@@ -48,9 +48,12 @@ config:
 
 service:
   dns:
-    type: ClusterIP
+    type: LoadBalancer
+    loadBalancerIP: 192.168.0.77
+    externalTrafficPolicy: Local
   api:
-    type: ClusterIP
+    type: LoadBalancer
+    loadBalancerIP: 192.168.0.77
     port: 8080
 
 ingress:

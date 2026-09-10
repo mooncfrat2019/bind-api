@@ -6,31 +6,28 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "bind-api.labels" . | nindent 4 }}
-  {{- with .Values.service.dns.annotations }}
-  annotations:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
 spec:
-  type: {{ .Values.service.dns.type }}
+  type: {{ .Values.service.dns.type | default "ClusterIP" }}
   {{- if eq .Values.service.dns.type "LoadBalancer" }}
-  externalTrafficPolicy: {{ .Values.service.dns.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ .Values.service.dns.externalTrafficPolicy | default "Local" }}
   {{- end }}
   {{- if eq .Values.service.dns.type "NodePort" }}
-  externalTrafficPolicy: {{ .Values.service.dns.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ .Values.service.dns.externalTrafficPolicy | default "Local" }}
   {{- end }}
   selector:
     {{- include "bind-api.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: master
   ports:
     - port: 53
       {{- if eq .Values.service.dns.type "NodePort" }}
-      nodePort: {{ .Values.service.dns.nodePort }}
+      nodePort: {{ .Values.service.dns.nodePort | default 30053 }}
       {{- end }}
       targetPort: dns-tcp
       name: dns-tcp
       protocol: TCP
     - port: 53
       {{- if eq .Values.service.dns.type "NodePort" }}
-      nodePort: {{ .Values.service.dns.nodePort }}
+      nodePort: {{ .Values.service.dns.nodePort | default 30053 }}
       {{- end }}
       targetPort: dns-udp
       name: dns-udp
@@ -48,6 +45,7 @@ spec:
   type: ClusterIP
   selector:
     {{- include "bind-api.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: master
   ports:
     - port: 53
       targetPort: dns-tcp
