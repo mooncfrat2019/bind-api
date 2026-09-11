@@ -1,4 +1,10 @@
-{{- if .Values.global.namespace }}
+{{- /*
+  Namespace создаётся через Helm флаг --create-namespace.
+  Этот шаблон создаёт namespace ТОЛЬКО если:
+  1. global.namespace указан
+  2. И release namespace НЕ совпадает с global.namespace (значит --create-namespace не используется)
+*/ -}}
+{{- if and .Values.global.namespace (ne .Values.global.namespace .Release.Namespace) }}
 apiVersion: v1
 kind: Namespace
 metadata:
