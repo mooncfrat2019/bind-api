@@ -62,12 +62,17 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
-      {{- if .Values.zonesStorage.enabled }}
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
       volumes:
         - name: postgres-data
+          {{- if .Values.postgresql.primary.persistence.enabled }}
           persistentVolumeClaim:
             claimName: {{ include "bind-api.fullname" . }}-postgresql-pvc
-      {{- end }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
   {{- if .Values.postgresql.primary.persistence.enabled }}
   volumeClaimTemplates:
     - metadata:

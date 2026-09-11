@@ -1,5 +1,4 @@
 {{- if and .Values.zonesStorage.enabled (eq .Values.role "master") .Values.zonesStorage.createPV }}
----
 apiVersion: v1
 kind: PersistentVolume
 metadata:
