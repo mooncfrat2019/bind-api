@@ -1,5 +1,4 @@
 {{- if and .Values.postgresql.enabled (eq .Values.role "master") }}
----
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:

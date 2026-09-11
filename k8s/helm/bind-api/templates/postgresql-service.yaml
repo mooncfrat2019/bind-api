@@ -1,6 +1,5 @@
 {{- if and .Values.postgresql.enabled (eq .Values.role "master") }}
 ---
-# Headless service для StatefulSet
 apiVersion: v1
 kind: Service
 metadata:

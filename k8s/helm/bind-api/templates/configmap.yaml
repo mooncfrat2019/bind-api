@@ -1,6 +1,4 @@
-# PostgreSQL
   {{- if .Values.postgresql.enabled }}
-# Встроенный PostgreSQL
 BIND_API_DB_HOST: {{ printf "%s-postgresql" .Release.Name | quote }}
 BIND_API_DB_PORT: "5432"
 BIND_API_DB_USER: {{ .Values.postgresql.auth.username | quote }}
