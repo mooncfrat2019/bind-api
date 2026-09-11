@@ -1,0 +1,194 @@
+# =============================================================================
+# Production конфигурация для 3-х нодного кластера
+# =============================================================================
+
+# === Глобальные настройки ===
+global:
+  namespace: bind-dns
+  storageClass: "hdd.network-drives.csi.timeweb.cloud"  # ← Ваш StorageClass
+
+# === Роль: MASTER (устанавливается первым) ===
+role: master
+
+# === Репликация ===
+replicaCount:
+  master: 1  # 1 мастер
+  replica: 0  # Реплики устанавливаются отдельным релизом
+
+# === PostgreSQL (встроенный, только на мастере) ===
+postgresql:
+  enabled: true
+  auth:
+    postgresPassword: "CHANGE_ME_SUPERUSER_PASSWORD"  # ← Измените!
+    username: bindapi
+    password: "CHANGE_ME_BINDAPI_PASSWORD"  # ← Измените!
+    database: bind_api
+  primary:
+    persistence:
+      enabled: true
+      size: 10Gi  # Увеличенный размер для production
+      storageClass: "hdd.network-drives.csi.timeweb.cloud"  # ← Ваш SC
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 2000m
+        memory: 4Gi
+
+# === Хранилище для зон ===
+zonesStorage:
+  enabled: true
+  size: 20Gi  # Увеличенный размер для production
+  storageClass: "hdd.network-drives.csi.timeweb.cloud"  # ← Ваш SC
+  accessModes:
+    - ReadWriteOnce
+
+# === Секреты (ОБЯЗАТЕЛЬНО измените!) ===
+secrets:
+  postgresPassword: "CHANGE_ME_BINDAPI_PASSWORD"
+  bootstrapKey: "CHANGE_ME_BOOTSTRAP_KEY_MIN_32_CHARS_LONG"  # ← Измените!
+  syncToken: "CHANGE_ME_SYNC_TOKEN_SECURE_VALUE"  # ← Измените!
+  masterApiToken: "CHANGE_ME_MASTER_API_TOKEN"  # ← Измените!
+  rndcKeySecret: "sbfd/SodkW6YqB0R9gUFhvMPgXpjeTJdrDkIskjtFQs="  # ← Сгенерируйте!
+
+# === Конфигурация приложения ===
+config:
+  logLevel: INFO  # INFO для production, DEBUG для отладки
+  apiPort: ":8080"
+  queue:
+    maxSize: 1000
+    workerTimeout: 180
+    batchSize: 50
+    batchInterval: 5
+    thresholdLow: 0.1
+    thresholdHigh: 0.3
+    reloadInterval: 10
+  sync:
+    cleanupInterval: "5m"
+    interval: 30
+    subnet: "10.0.0.0/8"  # ← Измените на вашу подсеть реплик
+    allowInsecure: false
+
+# === Сервисы ===
+service:
+  dns:
+    type: LoadBalancer  # LoadBalancer для внешнего доступа
+    # externalTrafficPolicy: Local  # Сохраняет client IP
+    annotations: {}
+    # Для Timeweb Cloud (если нужно)
+    # service.beta.kubernetes.io/timeweb-load-balancer-type: "nlb"
+  api:
+    type: LoadBalancer  # ← LoadBalancer для внешнего IP
+    port: 8080
+    externalTrafficPolicy: Local  # Сохраняет client IP
+    annotations: {}
+
+# === Ingress для API ===
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    # cert-manager.io/cluster-issuer: "letsencrypt-prod"  # Для HTTPS
+  hosts:
+    - host: bind-api.your-domain.com  # ← Измените!
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: bind-api-tls
+  #    hosts:
+  #      - bind-api.your-domain.com
+
+# === ServiceAccount ===
+serviceAccount:
+  create: true
+
+# === RBAC ===
+rbac:
+  create: true
+
+# === Pod Disruption Budget ===
+pdb:
+  enabled: true
+  minAvailable: 1  # Гарантирует что 1 под всегда доступен
+
+# === Monitoring ===
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: false  # Включить если есть Prometheus Operator
+    interval: 30s
+    scrapeTimeout: 10s
+
+# === Affinity для распределения по нодам ===
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: bind-api
+              app.kubernetes.io/component: master
+          topologyKey: kubernetes.io/hostname
+
+# === Node Selector (опционально) ===
+nodeSelector: {}
+#  disktype: hdd  # Если есть маркировка узлов
+
+# === Tolerations (опционально) ===
+tolerations: []
+# - key: "node-role.kubernetes.io/master"
+#   operator: "Exists"
+#   effect: "NoSchedule"
+
+# === Ресурсы для BIND-API ===
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+# === Образ BIND 9 ===
+bind:
+  image:
+    repository: internetsystemsconsortium/bind9
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# === Образ BIND-API ===
+image:
+  repository: zix2045/bind-api
+  tag: latest
+  pullPolicy: Always
+
+# === Probes ===
+probes:
+  liveness:
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+# === Security Context ===
+securityContext:
+  runAsUser: 0
+  runAsGroup: 0
+  fsGroup: 0

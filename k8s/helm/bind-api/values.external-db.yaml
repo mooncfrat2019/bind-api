@@ -1,0 +1,46 @@
+# Конфигурация для использования внешнего PostgreSQL
+
+# Отключаем встроенный PostgreSQL
+postgresql:
+  enabled: false
+
+# Включаем внешний PostgreSQL
+externalPostgresql:
+  enabled: true
+
+  # Подключение к вашему существующему PostgreSQL
+  host: "192.168.0.100"  # ← Ваш хост PostgreSQL
+  port: "5432"
+  user: "bindapi"
+  password: "your-secure-password"  # ← Лучше использовать secret
+  database: "bind_api"
+  sslMode: "disable"
+  schema: "public"
+
+  # Использовать существующий Secret
+  #existingSecret: "my-postgres-secret"  # ← Имя существующего secret
+  #existingSecretPasswordKey: "password"  # ← Ключ в secret
+
+# Остальные настройки
+secrets:
+  bootstrapKey: "your-bootstrap-key-min-32-chars"
+  syncToken: "your-sync-token"
+  masterApiToken: "your-master-api-token"
+  rndcKeySecret: "your-rndc-key-base64"
+
+config:
+  logLevel: INFO
+  apiPort: ":8080"
+
+service:
+  dns:
+    type: ClusterIP
+  api:
+    type: ClusterIP
+    port: 8080
+
+ingress:
+  enabled: false
+
+monitoring:
+  enabled: false

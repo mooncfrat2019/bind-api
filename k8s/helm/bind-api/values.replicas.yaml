@@ -1,0 +1,98 @@
+# =============================================================================
+# Конфигурация для REPLICA (устанавливается после MASTER)
+# =============================================================================
+
+# === Роль: REPLICA ===
+role: replica
+
+# === Репликация ===
+replicaCount:
+  master: 0
+  replica: 2  # ← 2 реплики для 3-х нодного кластера
+
+# === PostgreSQL не нужен для реплик ===
+postgresql:
+  enabled: false
+
+# === URL мастера (ОБЯЗАТЕЛЬНО укажите!) ===
+master:
+  url: "http://bind-api-master-master.bind-dns.svc.cluster.local:8080"
+  # Или внешний URL если есть:
+  # url: "https://bind-api.your-domain.com"
+
+# === Хранилище для зон ===
+zonesStorage:
+  enabled: true
+  size: 20Gi
+  storageClass: "hdd.network-drives.csi.timeweb.cloud"
+  accessModes:
+    - ReadWriteOnce
+
+# === Секреты (должны совпадать с мастером!) ===
+secrets:
+  syncToken: "CHANGE_ME_SYNC_TOKEN_SECURE_VALUE"  # ← То же что на мастере!
+  masterApiToken: "CHANGE_ME_MASTER_API_TOKEN"  # ← То же что на мастере!
+
+# === Конфигурация ===
+config:
+  logLevel: INFO
+  apiPort: ":8080"
+  sync:
+    interval: 30  # Интервал синхронизации с мастером
+
+# === Сервисы ===
+service:
+  dns:
+    type: ClusterIP  # Реплики только внутри кластера
+  api:
+    type: ClusterIP
+    port: 8080
+
+# === Affinity для распределения по нодам ===
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: bind-api
+              app.kubernetes.io/component: replica
+          topologyKey: kubernetes.io/hostname
+
+# === Ресурсы ===
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+bind:
+  image:
+    repository: internetsystemsconsortium/bind9
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+    memory: 512Mi
+
+image:
+  repository: zix2045/bind-api
+  tag: latest
+  pullPolicy: Always
+
+ingress:
+  enabled: false
+
+monitoring:
+  enabled: false
+
+pdb:
+  enabled: true
+  minAvailable: 1

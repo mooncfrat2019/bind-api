@@ -78,6 +78,34 @@ postgresql:
         cpu: 2000m
         memory: 2Gi
 
+# === Внешний PostgreSQL (если postgresql.enabled = false) ===
+externalPostgresql:
+  enabled: true  # ← Включить использование внешнего PostgreSQL
+
+  # Host внешнего PostgreSQL
+  host: "your-postgres-host.example.com"
+
+  # Порт (по умолчанию 5432)
+  port: "5432"
+
+  # Пользователь
+  user: "bindapi"
+
+  # Пароль
+  password: "your-secure-password"
+
+  # Имя базы данных
+  database: "bind_api"
+
+  # SSL режим (disable, require, verify-full, etc.)
+  sslMode: "disable"
+
+  # Schema (по умолчанию public)
+  schema: "public"
+
+  # existingSecret: ""  # ← Опционально: использовать существующий secret
+  # existingSecretPasswordKey: "password"  # ← Ключ в secret для пароля
+
 # === Хранилище для зон ===
 zonesStorage:
   enabled: true
