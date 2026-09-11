@@ -1,18 +1,110 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "bind-api.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "bind-api.labels" . | nindent 4 }}
+data:
+  # Основной конфиг BIND
+  named.conf: |
+    options {
+        directory "/var/named";
+        pid-file "/var/named/named.pid";
+        allow-recursion { 10.0.0.0/8; 172.16.0.0/12; 192.168.0.0/16; };
+        allow-transfer { 10.0.0.0/8; };
+        listen-on port 53 { any; };
+        listen-on-v6 port 53 { any; };
+        querylog yes;
+    };
+
+    controls {
+        inet 127.0.0.1 port 953 allow { 127.0.0.1; } keys { "rndc-key"; };
+    };
+
+    key "rndc-key" {
+        algorithm hmac-sha256;
+        secret "{{ .Values.secrets.rndcKeySecret }}";
+    };
+
+    include "/etc/named.zones.conf";
+
+  # Конфиг зон
+  named.zones.conf: |
+    // Зоны управляются через BIND-API
+
+  # Переменные окружения
+  {{- if .Values.config }}
+  {{- if .Values.config.logLevel }}
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  {{- else }}
+  LOG_LEVEL: "INFO"
+  {{- end }}
+  {{- else }}
+  LOG_LEVEL: "INFO"
+  {{- end }}
+
+  {{- if .Values.config }}
+  {{- if .Values.config.apiPort }}
+  API_PORT: {{ .Values.config.apiPort | quote }}
+  {{- else }}
+  API_PORT: ":8080"
+  {{- end }}
+  {{- else }}
+  API_PORT: ":8080"
+  {{- end }}
+
+  # Настройки очереди
+  {{- if and .Values.config .Values.config.queue }}
+  MAX_QUEUE_SIZE: {{ .Values.config.queue.maxSize | default 1000 | quote }}
+  WORKER_TIMEOUT: {{ .Values.config.queue.workerTimeout | default 180 | quote }}
+  BATCH_SIZE: {{ .Values.config.queue.batchSize | default 50 | quote }}
+  BATCH_INTERVAL: {{ .Values.config.queue.batchInterval | default 5 | quote }}
+  QUEUE_THRESHOLD_LOW: {{ .Values.config.queue.thresholdLow | default 0.1 | quote }}
+  QUEUE_THRESHOLD_HIGH: {{ .Values.config.queue.thresholdHigh | default 0.3 | quote }}
+  RELOAD_INTERVAL: {{ .Values.config.queue.reloadInterval | default 10 | quote }}
+  {{- else }}
+  MAX_QUEUE_SIZE: "1000"
+  WORKER_TIMEOUT: "180"
+  BATCH_SIZE: "50"
+  BATCH_INTERVAL: "5"
+  QUEUE_THRESHOLD_LOW: "0.1"
+  QUEUE_THRESHOLD_HIGH: "0.3"
+  RELOAD_INTERVAL: "10"
+  {{- end }}
+
+  # Настройки синхронизации
+  {{- if and .Values.config .Values.config.sync }}
+  SYNC_CLEANUP_INTERVAL: {{ .Values.config.sync.cleanupInterval | default "5m" | quote }}
+  SYNC_API_SUBNET: {{ .Values.config.sync.subnet | default "10.0.0.0/8" | quote }}
+  SYNC_INTERVAL: {{ .Values.config.sync.interval | default 30 | quote }}
+  ALLOW_INSECURE_SYNC: {{ .Values.config.sync.allowInsecure | default false | quote }}
+  {{- else }}
+  SYNC_CLEANUP_INTERVAL: "5m"
+  SYNC_API_SUBNET: "10.0.0.0/8"
+  SYNC_INTERVAL: "30"
+  ALLOW_INSECURE_SYNC: "false"
+  {{- end }}
+
+  # Пути
+  BIND_ZONE_DIR: "/var/named/"
+  BIND_NAMED_CONF: "/etc/named.conf"
+
+  # PostgreSQL
   {{- if .Values.postgresql.enabled }}
-BIND_API_DB_HOST: {{ printf "%s-postgresql" .Release.Name | quote }}
-BIND_API_DB_PORT: "5432"
-BIND_API_DB_USER: {{ .Values.postgresql.auth.username | quote }}
-BIND_API_DB_NAME: {{ .Values.postgresql.auth.database | quote }}
-BIND_API_DB_SSLMODE: "disable"
+  BIND_API_DB_HOST: {{ printf "%s-postgresql" .Release.Name | quote }}
+  BIND_API_DB_PORT: "5432"
+  BIND_API_DB_USER: {{ .Values.postgresql.auth.username | quote }}
+  BIND_API_DB_NAME: {{ .Values.postgresql.auth.database | quote }}
+  BIND_API_DB_SSLMODE: "disable"
   {{- else if .Values.externalPostgresql.enabled }}
-# Внешний PostgreSQL
-BIND_API_DB_HOST: {{ .Values.externalPostgresql.host | quote }}
-BIND_API_DB_PORT: {{ .Values.externalPostgresql.port | default "5432" | quote }}
-BIND_API_DB_USER: {{ .Values.externalPostgresql.user | quote }}
-BIND_API_DB_NAME: {{ .Values.externalPostgresql.database | quote }}
-BIND_API_DB_SSLMODE: {{ .Values.externalPostgresql.sslMode | default "disable" | quote }}
+  BIND_API_DB_HOST: {{ .Values.externalPostgresql.host | quote }}
+  BIND_API_DB_PORT: {{ .Values.externalPostgresql.port | default "5432" | quote }}
+  BIND_API_DB_USER: {{ .Values.externalPostgresql.user | quote }}
+  BIND_API_DB_NAME: {{ .Values.externalPostgresql.database | quote }}
+  BIND_API_DB_SSLMODE: {{ .Values.externalPostgresql.sslMode | default "disable" | quote }}
   {{- end }}
 
   {{- if .Values.externalPostgresql.schema }}
-BIND_API_DB_SCHEMA: {{ .Values.externalPostgresql.schema | quote }}
+  BIND_API_DB_SCHEMA: {{ .Values.externalPostgresql.schema | quote }}
   {{- end }}
