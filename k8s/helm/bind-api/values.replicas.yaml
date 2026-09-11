@@ -71,7 +71,7 @@ resources:
 
 bind:
   image:
-    repository: internetsystemsconsortium/bind9
+    repository: ubuntu/bind9
     tag: "latest"
     pullPolicy: IfNotPresent
   resources:
