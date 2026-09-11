@@ -37,12 +37,15 @@ postgresql:
         memory: 4Gi
 
 # === Хранилище для зон ===
+# === Хранилище для зон ===
 zonesStorage:
   enabled: true
-  size: 20Gi  # Увеличенный размер для production
-  storageClass: "hdd.network-drives.csi.timeweb.cloud"  # ← Ваш SC
+  size: 20Gi
+  storageClass: "hdd.network-drives.csi.timeweb.cloud"
   accessModes:
     - ReadWriteOnce
+  createPV: false  # ← Добавить
+  hostPath: ""
 
 # === Секреты (ОБЯЗАТЕЛЬНО измените!) ===
 secrets:
