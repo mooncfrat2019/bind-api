@@ -30,8 +30,8 @@ zonesStorage:
 
 # === Секреты (должны совпадать с мастером!) ===
 secrets:
-  syncToken: "CHANGE_ME_SYNC_TOKEN_SECURE_VALUE"  # ← То же что на мастере!
-  masterApiToken: "CHANGE_ME_MASTER_API_TOKEN"  # ← То же что на мастере!
+  syncToken: "test-sync-token-value" # ← То же что на мастере!
+  masterApiToken: "test-master-api-token"  # ← То же что на мастере!
 
 # === Конфигурация ===
 config:

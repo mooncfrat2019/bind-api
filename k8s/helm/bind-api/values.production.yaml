@@ -44,11 +44,11 @@ zonesStorage:
 
 # === Секреты (ОБЯЗАТЕЛЬНО измените!) ===
 secrets:
-  postgresPassword: "CHANGE_ME_BINDAPI_PASSWORD"
-  bootstrapKey: "CHANGE_ME_BOOTSTRAP_KEY_MIN_32_CHARS_LONG"  # ← Измените!
-  syncToken: "CHANGE_ME_SYNC_TOKEN_SECURE_VALUE"  # ← Измените!
-  masterApiToken: "CHANGE_ME_MASTER_API_TOKEN"  # ← Измените!
-  rndcKeySecret: "sbfd/SodkW6YqB0R9gUFhvMPgXpjeTJdrDkIskjtFQs="  # ← Сгенерируйте!
+  postgresPassword: "test-bindapi-password"
+  bootstrapKey: "test-bootstrap-key-min-32-chars-long-secure"
+  syncToken: "test-sync-token-value"
+  masterApiToken: "test-master-api-token"
+  rndcKeySecret: "sbfd/SodkW6YqB0R9gUFhvMPgXpjeTJdrDkIskjtFQs="
 
 # === Конфигурация приложения ===
 config:
