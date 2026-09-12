@@ -1,5 +1,9 @@
 {{- if and .Values.postgresql.enabled (eq .Values.role "master") }}
 ---
+# Headless-сервис (serviceName для StatefulSet). Именно на это имя смотрит приложение.
+# publishNotReadyAddresses=true — DNS-имя резолвится сразу после старта пода,
+# не дожидаясь прохождения readinessProbe (иначе headless-сервис отдаёт NXDOMAIN
+# и приложение падает с "no such host").
 apiVersion: v1
 kind: Service
 metadata:
@@ -10,6 +14,7 @@ metadata:
     app.kubernetes.io/component: postgresql
 spec:
   clusterIP: None
+  publishNotReadyAddresses: true
   selector:
     {{- include "bind-api.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: postgresql

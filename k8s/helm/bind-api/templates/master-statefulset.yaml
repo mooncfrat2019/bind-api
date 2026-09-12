@@ -1,4 +1,5 @@
 {{- if eq .Values.role "master" }}
+{{- $useExistingSecret := and .Values.externalPostgresql.enabled (not (empty .Values.externalPostgresql.existingSecret)) }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -23,8 +24,7 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "{{ include "bind-api.apiPort" . }}"
         prometheus.io/path: "/metrics"
-        # Перекатывает под при изменении ConfigMap/Secret: без этого env,
-        # полученные через envFrom/secretKeyRef, остаются старыми до ручного рестарта
+        # Перекатывает под при изменении ConfigMap/Secret, иначе env остаются старыми
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         checksum/secrets: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
     spec:
@@ -34,6 +34,51 @@ spec:
       securityContext:
         {{- toYaml .Values.securityContext | nindent 8 }}
       initContainers:
+        # Ждём готовности PostgreSQL до старта приложения: иначе API стартует
+        # раньше БД, получает "no such host" и НЕ создаёт таблицы (миграции
+        # выполняются один раз на старте и больше не повторяются).
+        {{- if or .Values.postgresql.enabled .Values.externalPostgresql.enabled }}
+        - name: wait-for-postgres
+          image: postgres:15-alpine
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              echo "Waiting for PostgreSQL at ${DB_HOST}:${DB_PORT} (user=${DB_USER}, db=${DB_NAME})..."
+              attempt=0
+              until pg_isready -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" >/dev/null 2>&1; do
+                attempt=$((attempt + 1))
+                if [ "${attempt}" -ge 150 ]; then
+                  echo "ERROR: PostgreSQL is not ready after ~5 minutes. Aborting." >&2
+                  exit 1
+                fi
+                echo "attempt ${attempt}: PostgreSQL not ready, retrying in 2s..."
+                sleep 2
+              done
+              echo "PostgreSQL is ready"
+          env:
+            - name: DB_HOST
+              value: {{ include "bind-api.postgresqlHost" . | quote }}
+            {{- if .Values.postgresql.enabled }}
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_USER
+              value: {{ .Values.postgresql.auth.username | quote }}
+            - name: DB_NAME
+              value: {{ .Values.postgresql.auth.database | default "bind_api" | quote }}
+            {{- else }}
+            - name: DB_PORT
+              value: {{ .Values.externalPostgresql.port | default "5432" | quote }}
+            - name: DB_USER
+              value: {{ .Values.externalPostgresql.user | quote }}
+            - name: DB_NAME
+              value: {{ .Values.externalPostgresql.database | default "bind_api" | quote }}
+            {{- end }}
+          securityContext:
+            runAsUser: 0
+        {{- end }}
         - name: init-config
           image: "{{ .Values.bind.image.repository }}:{{ .Values.bind.image.tag }}"
           imagePullPolicy: {{ .Values.bind.image.pullPolicy }}
@@ -69,18 +114,20 @@ spec:
               };
               EOF
 
-              # Устанавливаем права
-              chown root:named /config/named.conf /config/named.zones.conf /config/rndc.conf /config/rndc.key
+              # Устанавливаем права.
+              # Пользователя/группы "named" в образе ubuntu/bind9 НЕТ — BIND запускается
+              # как root, поэтому владелец root:root.
+              chown root:root /config/named.conf /config/named.zones.conf /config/rndc.conf /config/rndc.key
               chmod 640 /config/named.conf /config/named.zones.conf /config/rndc.conf /config/rndc.key
 
               # Инициализируем директорию зон
               mkdir -p /var/named
-              chown -R root:named /var/named
+              chown -R root:root /var/named
               chmod 775 /var/named
 
               # Создаём /run/named
               mkdir -p /run/named
-              chown named:named /run/named
+              chown root:root /run/named
 
               echo "Config initialized"
           volumeMounts:
@@ -160,8 +207,24 @@ spec:
               value: "/etc/rndc.conf"
             - name: APP_ROLE
               value: "master"
-            # Явный env ПЕРЕКРЫВАЕТ envFrom из ConfigMap:
-            # фактическое имя БД берётся из BIND_API_DB_URL
+            # ── Параметры подключения к БД ─────────────────────────────────
+            # Явный env ПЕРЕКРЫВАЕТ envFrom из ConfigMap. Для режима
+            # existingSecret задаём только пароль (DSN соберётся из переменных
+            # ConfigMap), в остальных случаях — пароль + DSN из нашего Secret.
+            {{- if $useExistingSecret }}
+            - name: BIND_API_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.externalPostgresql.existingSecret }}
+                  key: {{ .Values.externalPostgresql.existingSecretPasswordKey | default "password" }}
+            {{- with .Values.externalPostgresql.existingSecretUrlKey }}
+            - name: BIND_API_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.externalPostgresql.existingSecret }}
+                  key: {{ . }}
+            {{- end }}
+            {{- else }}
             - name: BIND_API_DB_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -172,6 +235,7 @@ spec:
                 secretKeyRef:
                   name: {{ include "bind-api.fullname" . }}-secrets
                   key: BIND_API_DB_URL
+            {{- end }}
             - name: BIND_API_BOOTSTRAP_KEY
               valueFrom:
                 secretKeyRef:
