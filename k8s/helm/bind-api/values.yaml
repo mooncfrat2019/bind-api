@@ -64,7 +64,7 @@ postgresql:
     postgresPassword: "CHANGE_ME_SUPERUSER_PASSWORD"
     username: bindapi
     password: "CHANGE_ME_BINDAPI_PASSWORD"
-    database: bind_api
+    database: bindapi
   primary:
     persistence:
       enabled: true
@@ -80,7 +80,7 @@ postgresql:
 
 # === Внешний PostgreSQL (если postgresql.enabled = false) ===
 externalPostgresql:
-  enabled: true  # ← Включить использование внешнего PostgreSQL
+  enabled: false  # ← Включить использование внешнего PostgreSQL
 
   # Host внешнего PostgreSQL
   host: "your-postgres-host.example.com"
@@ -95,7 +95,7 @@ externalPostgresql:
   password: "your-secure-password"
 
   # Имя базы данных
-  database: "bind_api"
+  database: "bindapi"
 
   # SSL режим (disable, require, verify-full, etc.)
   sslMode: "disable"
