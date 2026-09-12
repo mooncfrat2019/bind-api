@@ -95,7 +95,7 @@ externalPostgresql:
   password: "your-secure-password"
 
   # Имя базы данных
-  database: "bindapi"
+  database: "bind_api"
 
   # SSL режим (disable, require, verify-full, etc.)
   sslMode: "disable"
