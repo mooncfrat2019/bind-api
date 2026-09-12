@@ -23,6 +23,10 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "{{ include "bind-api.apiPort" . }}"
         prometheus.io/path: "/metrics"
+        # Перекатывает под при изменении ConfigMap/Secret: без этого env,
+        # полученные через envFrom/secretKeyRef, остаются старыми до ручного рестарта
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secrets: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
     spec:
       {{- if .Values.serviceAccount.create }}
       serviceAccountName: {{ include "bind-api.serviceAccountName" . }}
@@ -156,6 +160,8 @@ spec:
               value: "/etc/rndc.conf"
             - name: APP_ROLE
               value: "master"
+            # Явный env ПЕРЕКРЫВАЕТ envFrom из ConfigMap:
+            # фактическое имя БД берётся из BIND_API_DB_URL
             - name: BIND_API_DB_PASSWORD
               valueFrom:
                 secretKeyRef:

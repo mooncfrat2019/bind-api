@@ -95,14 +95,20 @@ data:
   BIND_API_DB_HOST: {{ printf "%s-postgresql" .Release.Name | quote }}
   BIND_API_DB_PORT: "5432"
   BIND_API_DB_USER: {{ .Values.postgresql.auth.username | quote }}
-  BIND_API_DB_NAME: {{ .Values.postgresql.auth.database | quote }}
+  BIND_API_DB_NAME: {{ .Values.postgresql.auth.database | default "bind_api" | quote }}
   BIND_API_DB_SSLMODE: "disable"
   {{- else if .Values.externalPostgresql.enabled }}
   BIND_API_DB_HOST: {{ .Values.externalPostgresql.host | quote }}
   BIND_API_DB_PORT: {{ .Values.externalPostgresql.port | default "5432" | quote }}
   BIND_API_DB_USER: {{ .Values.externalPostgresql.user | quote }}
-  BIND_API_DB_NAME: {{ .Values.externalPostgresql.database | quote }}
+  BIND_API_DB_NAME: {{ .Values.externalPostgresql.database | default "bind_api" | quote }}
   BIND_API_DB_SSLMODE: {{ .Values.externalPostgresql.sslMode | default "disable" | quote }}
+  {{- else }}
+  BIND_API_DB_HOST: "127.0.0.1"
+  BIND_API_DB_PORT: "5432"
+  BIND_API_DB_USER: "bindapi"
+  BIND_API_DB_NAME: "bind_api"
+  BIND_API_DB_SSLMODE: "disable"
   {{- end }}
 
   {{- if .Values.externalPostgresql.schema }}
