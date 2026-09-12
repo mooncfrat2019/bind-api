@@ -17,7 +17,7 @@ postgresql:
     postgresPassword: "test-superuser-password"
     username: bindapi
     password: "test-bindapi-password"
-    database: bindapi
+    database: bind_api
   primary:
     persistence:
       enabled: true

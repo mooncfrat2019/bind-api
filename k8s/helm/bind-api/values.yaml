@@ -64,7 +64,7 @@ postgresql:
     postgresPassword: "CHANGE_ME_SUPERUSER_PASSWORD"
     username: bindapi
     password: "CHANGE_ME_BINDAPI_PASSWORD"
-    database: bindapi
+    database: bind_api
   primary:
     persistence:
       enabled: true
