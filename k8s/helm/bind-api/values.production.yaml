@@ -14,9 +14,9 @@ replicaCount:
 postgresql:
   enabled: true
   auth:
-    postgresPassword: "CHANGE_ME_SUPERUSER_PASSWORD"  # ← Измените!
+    postgresPassword: "test-superuser-password"
     username: bindapi
-    password: "CHANGE_ME_BINDAPI_PASSWORD"  # ← Измените!
+    password: "test-bindapi-password"
     database: bind_api
   primary:
     persistence:
