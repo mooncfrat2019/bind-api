@@ -1,6 +1,9 @@
 # =============================================================================
-# Конфигурация для REPLICA (устанавливается после MASTER)
+# Конфигурация для REPLICA (устанавливается ОТДЕЛЬНЫМ релизом после MASTER)
 # =============================================================================
+
+global:
+  namespace: bind-dns
 
 # === Роль: REPLICA ===
 role: replica
@@ -8,45 +11,71 @@ role: replica
 # === Репликация ===
 replicaCount:
   master: 0
-  replica: 2  # ← 2 реплики для 3-х нодного кластера
+  replica: 2  # 2 реплики
 
 # === PostgreSQL не нужен для реплик ===
 postgresql:
   enabled: false
+externalPostgresql:
+  enabled: false
 
-# === URL мастера (ОБЯЗАТЕЛЬНО укажите!) ===
+# === Мастер ===
 master:
+  # URL API мастера. Release мастера = bind-api-master, поэтому его headless
+  # сервис = bind-api-master-master (и он же отдаёт порт api).
   url: "http://bind-api-master-master.bind-dns.svc.cluster.local:8080"
-  # Или внешний URL если есть:
-  # url: "https://bind-api.your-domain.com"
+  # Адрес мастера для BIND masters { } — по нему реплика делает AXFR.
+  # Пусто => приложение подставит 127.0.0.1, и AXFR работать НЕ будет.
+  ip: "bind-api-master-master.bind-dns.svc.cluster.local"
 
-# === Хранилище для зон ===
+# === Хранилище для зон (у каждой реплики свой PVC) ===
 zonesStorage:
   enabled: true
   size: 20Gi
   storageClass: "hdd.network-drives.csi.timeweb.cloud"
   accessModes:
     - ReadWriteOnce
+  createPV: false
+  hostPath: ""
 
 # === Секреты (должны совпадать с мастером!) ===
 secrets:
-  syncToken: "test-sync-token-value" # ← То же что на мастере!
-  masterApiToken: "test-master-api-token"  # ← То же что на мастере!
+  # ОБЯЗАТЕЛЬНО = secrets.syncToken мастера, иначе мастер ответит 401 на /api/sync/*
+  masterApiToken: "test-sync-token-value"
+  # Токен мастера; для реплики не используется, но секрет рендерится
+  syncToken: "test-sync-token-value"
+  # rndc-ключ ДОЛЖЕН совпадать с мастером: реплика получает named.conf
+  # мастера (с этим ключом внутри) и должна уметь ходить в свой rndc.
+  rndcKeySecret: "sbfd/SodkW6YqB0R9gUFhvMPgXpjeTJdrDkIskjtFQs="
+  # bootstrap-ключ на реплике не нужен
+  bootstrapKey: ""
 
-# === Конфигурация ===
+# === Конфигурация приложения ===
 config:
   logLevel: INFO
   apiPort: ":8080"
   sync:
-    interval: 30  # Интервал синхронизации с мастером
+    interval: 30
+    subnet: "10.0.0.0/8"  # должно покрывать подсеть подов реплик
+    allowInsecure: true   # MASTER_URL по http внутри кластера — обязательно
 
 # === Сервисы ===
 service:
   dns:
-    type: ClusterIP  # Реплики только внутри кластера
+    type: ClusterIP  # реплики только внутри кластера
   api:
     type: ClusterIP
     port: 8080
+
+ingress:
+  enabled: false
+
+monitoring:
+  enabled: false
+
+pdb:
+  enabled: true
+  minAvailable: 1
 
 # === Affinity для распределения по нодам ===
 affinity:
@@ -82,17 +111,31 @@ bind:
       cpu: 500m
       memory: 512Mi
 
+# Тот же образ, что и у мастера — отдельных сборок не нужно
 image:
   repository: zix2045/bind-api
   tag: latest
   pullPolicy: Always
 
-ingress:
-  enabled: false
+probes:
+  liveness:
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
 
-monitoring:
-  enabled: false
+securityContext:
+  runAsUser: 0
+  runAsGroup: 0
+  fsGroup: 0
 
-pdb:
-  enabled: true
-  minAvailable: 1
+serviceAccount:
+  create: true
+
+rbac:
+  create: true
