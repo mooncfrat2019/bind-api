@@ -2722,13 +2722,24 @@ func (r *ReplicaSync) transformZoneBody(body string) string {
 }
 
 func (r *ReplicaSync) reloadBIND() error {
-	cmd := exec.Command("rndc", "reload")
+	// ВАЖНО: rndc должен использовать тот же ключ, что и named в controls{}.
+	// Без -c rndc берёт ключ по умолчанию (/etc/bind/rndc.key из пакета bind9),
+	// который не совпадает с ключом в /config/named.conf -> "bad auth".
+	args := []string{}
+	if rndcConf := os.Getenv("RNDC_CONF"); rndcConf != "" {
+		args = append(args, "-c", rndcConf)
+	}
+	args = append(args, "reload")
+
+	cmd := exec.Command("rndc", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		cmd = exec.Command("systemctl", "reload", "named")
-		output, err = cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("ошибка перезагрузки BIND: %s - %v", string(output), err)
+		Warn("rndc reload не удался: %s (%v), пробую systemctl reload named", string(output), err)
+		cmd2 := exec.Command("systemctl", "reload", "named")
+		output2, err2 := cmd2.CombinedOutput()
+		if err2 != nil {
+			return fmt.Errorf("ошибка перезагрузки BIND: rndc: %s (%v); systemctl: %s (%v)",
+				string(output), err, string(output2), err2)
 		}
 	}
 	return nil
@@ -3143,36 +3154,19 @@ func (r *ReplicaSync) CheckAndFixZones() error {
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 
-			cmd := exec.CommandContext(ctx, "rndc", "retransfer", zoneName)
-			output, err := cmd.CombinedOutput()
+			// Тот же ключ, что и у named: обязательно -c <RNDC_CONF>,
+			// иначе реплика получает "bad auth" и зона не трансферится.
+			rndcArgs := []string{}
+			if rndcConf := os.Getenv("RNDC_CONF"); rndcConf != "" {
+				rndcArgs = append(rndcArgs, "-c", rndcConf)
+			}
+			rndcArgs = append(rndcArgs, "retransfer", zoneName)
+
+			cmd := exec.CommandContext(ctx, "rndc", rndcArgs...)
+			_, err := cmd.CombinedOutput()
 
 			if Metrics != nil {
 				Metrics.RecordReplicaRetransfer(zoneName, err)
-			}
-
-			if err != nil {
-				Error("Ошибка retransfer для зоны %s: %v, output: %s", zoneName, err, string(output))
-				continue
-			}
-
-			Info("Retransfer для зоны %s выполнен успешно", zoneName)
-
-			// После retransfer делаем паузу и проверяем снова
-			time.Sleep(2 * time.Second)
-
-			// Повторная проверка после retransfer
-			allResolved := true
-			for _, record := range records {
-				if !r.CheckARecordResolve(zoneName, record.Name, record.Value) {
-					allResolved = false
-					Warn("После retransfer запись %s.%s всё ещё не резолвится", record.Name, zoneName)
-				}
-			}
-
-			if allResolved {
-				Info("Зона %s полностью синхронизирована", zoneName)
-			} else {
-				Warn("После retransfer зона %s всё ещё имеет проблемы", zoneName)
 			}
 		}
 	}
