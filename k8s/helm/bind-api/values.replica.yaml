@@ -1,4 +1,9 @@
-# Values для REPLICA роли
+# =============================================================================
+# Конфигурация для REPLICA (устанавливается ОТДЕЛЬНЫМ релизом после MASTER)
+# =============================================================================
+
+global:
+  namespace: bind-dns
 
 role: replica
 
@@ -6,15 +11,76 @@ replicaCount:
   master: 0
   replica: 2
 
-# PostgreSQL не нужен для реплик
+# PostgreSQL на реплике не нужен
 postgresql:
   enabled: false
+externalPostgresql:
+  enabled: false
 
-# URL мастера (ОБЯЗАТЕЛЬНО укажите)
 master:
-  url: "https://bind-api-master.bind-dns.svc.cluster.local:8080"
+  # URL API мастера. Используем ClusterIP-сервис API мастера (НЕ headless).
+  # Для релиза мастера bind-api-master это bind-api-master-api.
+  url: "http://bind-api-master-api.bind-dns.svc.cluster.local:8080"
+  # Адрес мастера для BIND masters { } — по нему реплика делает AXFR.
+  # Лучше всего указать стабильный адрес (ClusterIP сервиса DNS мастера
+  # или IP пода мастера). Имя сервиса тоже допустимо, если BIND его резолвит.
+  ip: "bind-api-master-dns-internal.bind-dns.svc.cluster.local"
 
-# Ресурсы для реплик
+zonesStorage:
+  enabled: true
+  size: 20Gi
+  storageClass: "hdd.network-drives.csi.timeweb.cloud"
+  accessModes:
+    - ReadWriteOnce
+
+secrets:
+  # ДОЛЖНЫ совпадать с мастером
+  syncToken: "test-sync-token-value"
+  # ВАЖНО: MASTER_API_TOKEN реплики = SYNC_API_TOKEN мастера
+  masterApiToken: "test-sync-token-value"
+  # rndc-ключ. Может быть свой, но ОБЯЗАТЕЛЬНО непустой,
+  # иначе named-checkconf на реплике упадёт на secret "".
+  rndcKeySecret: "sbfd/SodkW6YqB0R9gUFhvMPgXpjeTJdrDkIskjtFQs="
+  # На реплике bootstrap-ключ не нужен
+  bootstrapKey: ""
+
+config:
+  logLevel: INFO
+  apiPort: ":8080"
+  sync:
+    interval: 30
+    subnet: "10.0.0.0/8"
+    # MASTER_URL внутри кластера по http -> обязательно true
+    allowInsecure: true
+
+service:
+  dns:
+    type: ClusterIP
+  api:
+    type: ClusterIP
+    port: 8080
+
+ingress:
+  enabled: false
+
+monitoring:
+  enabled: false
+
+pdb:
+  enabled: true
+  minAvailable: 1
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: bind-api
+              app.kubernetes.io/component: replica
+          topologyKey: kubernetes.io/hostname
+
 resources:
   requests:
     cpu: 500m
@@ -23,7 +89,44 @@ resources:
     cpu: 2000m
     memory: 2Gi
 
-# Интервал синхронизации
-config:
-  sync:
-    interval: 30
+bind:
+  image:
+    repository: ubuntu/bind9
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# Тот же образ, что и у мастера — отдельных сборок не нужно
+image:
+  repository: zix2045/bind-api
+  tag: latest
+  pullPolicy: Always
+
+probes:
+  liveness:
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+securityContext:
+  runAsUser: 0
+  runAsGroup: 0
+  fsGroup: 0
+
+serviceAccount:
+  create: true
+
+rbac:
+  create: true

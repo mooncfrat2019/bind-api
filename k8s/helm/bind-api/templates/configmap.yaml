@@ -6,7 +6,10 @@ metadata:
   labels:
     {{- include "bind-api.labels" . | nindent 4 }}
 data:
-  # Основной конфиг BIND
+  # Основной конфиг BIND.
+  # ВАЖНО: рабочая копия этого файла лежит в /config (writable каталог в поде),
+  # потому что BIND-API переписывает его через os.Rename. subPath-монтирование
+  # отдельных файлов такой rename ломает.
   named.conf: |
     options {
         directory "/var/named";
@@ -27,7 +30,7 @@ data:
         secret "{{ .Values.secrets.rndcKeySecret }}";
     };
 
-    include "/etc/named.zones.conf";
+    include "/config/named.zones.conf";
 
   # Конфиг зон
   named.zones.conf: |
@@ -86,10 +89,12 @@ data:
   ALLOW_INSECURE_SYNC: "false"
   {{- end }}
 
-  # Пути
+  # Пути.
+  # Конфиги BIND лежат в writable каталоге /config (см. init-контейнеры),
+  # файлы зон — на постоянном томе /var/named.
   BIND_ZONE_DIR: "/var/named/"
-  BIND_NAMED_CONF: "/etc/named.conf"
-  BIND_ZONE_CONF: "/etc/named.zones.conf"
+  BIND_NAMED_CONF: "/config/named.conf"
+  BIND_ZONE_CONF: "/config/named.zones.conf"
   # WAL асинхронного буфера кладём на постоянный том зон (PVC /var/named),
   # чтобы он переживал пересоздание пода и не давал дублей после рестарта.
   BIND_API_WAL_PATH: "/var/named/.state/bind-api-wal.log"

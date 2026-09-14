@@ -24,7 +24,6 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "{{ include "bind-api.apiPort" . }}"
         prometheus.io/path: "/metrics"
-        # Перекатывает под при изменении ConfigMap/Secret, иначе env остаются старыми
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         checksum/secrets: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
     spec:
@@ -34,9 +33,6 @@ spec:
       securityContext:
         {{- toYaml .Values.securityContext | nindent 8 }}
       initContainers:
-        # Ждём готовности PostgreSQL до старта приложения: иначе API стартует
-        # раньше БД, получает "no such host" и НЕ создаёт таблицы (миграции
-        # выполняются один раз на старте и больше не повторяются).
         {{- if or .Values.postgresql.enabled .Values.externalPostgresql.enabled }}
         - name: wait-for-postgres
           image: postgres:15-alpine
@@ -86,14 +82,15 @@ spec:
             - /bin/sh
             - -c
             - |
-              # Копируем конфиги из ConfigMap
+              set -eu
+
+              # Копируем конфиги из ConfigMap в writable каталог /config
               cp /config-src/named.conf /config/named.conf
               cp /config-src/named.zones.conf /config/named.zones.conf
 
-              # Читаем ключ из Secret
+              # Читаем ключ из Secret и собираем rndc.conf / rndc.key
               RNDC_KEY=$(cat /rndc-src/rndc.key)
 
-              # Создаём rndc.conf для BIND-API
               cat > /config/rndc.conf << EOF
               key "rndc-key" {
                   algorithm hmac-sha256;
@@ -106,7 +103,6 @@ spec:
               };
               EOF
 
-              # Создаём rndc.key для BIND
               cat > /config/rndc.key << EOF
               key "rndc-key" {
                   algorithm hmac-sha256;
@@ -114,22 +110,13 @@ spec:
               };
               EOF
 
-              # Устанавливаем права.
-              # Пользователя/группы "named" в образе ubuntu/bind9 НЕТ — BIND запускается
-              # как root, поэтому владелец root:root.
-              chown root:root /config/named.conf /config/named.zones.conf /config/rndc.conf /config/rndc.key
               chmod 640 /config/named.conf /config/named.zones.conf /config/rndc.conf /config/rndc.key
 
-              # Инициализируем директорию зон
               mkdir -p /var/named
-              chown -R root:root /var/named
               chmod 775 /var/named
 
-              # Создаём /run/named
               mkdir -p /run/named
-              chown root:root /run/named
-
-              echo "Config initialized"
+              echo "Master config initialized"
           volumeMounts:
             - name: config-src
               mountPath: /config-src
@@ -163,17 +150,10 @@ spec:
               containerPort: 953
               protocol: TCP
           volumeMounts:
+            - name: config
+              mountPath: /config
             - name: bind-zones-storage
               mountPath: /var/named
-            - name: config
-              mountPath: /config/named.conf
-              subPath: named.conf
-            - name: config
-              mountPath: /etc/named.zones.conf
-              subPath: named.zones.conf
-            - name: config
-              mountPath: /etc/rndc.key
-              subPath: rndc.key
             - name: run-named
               mountPath: /run/named
           resources:
@@ -204,13 +184,9 @@ spec:
               protocol: TCP
           env:
             - name: RNDC_CONF
-              value: "/etc/rndc.conf"
+              value: "/config/rndc.conf"
             - name: APP_ROLE
               value: "master"
-            # ── Параметры подключения к БД ─────────────────────────────────
-            # Явный env ПЕРЕКРЫВАЕТ envFrom из ConfigMap. Для режима
-            # existingSecret задаём только пароль (DSN соберётся из переменных
-            # ConfigMap), в остальных случаях — пароль + DSN из нашего Secret.
             {{- if $useExistingSecret }}
             - name: BIND_API_DB_PASSWORD
               valueFrom:
@@ -250,20 +226,10 @@ spec:
             - configMapRef:
                 name: {{ include "bind-api.fullname" . }}-config
           volumeMounts:
+            - name: config
+              mountPath: /config
             - name: bind-zones-storage
               mountPath: /var/named
-            - name: config
-              mountPath: /etc/named.conf
-              subPath: named.conf
-            - name: config
-              mountPath: /etc/named.zones.conf
-              subPath: named.zones.conf
-            - name: config
-              mountPath: /etc/rndc.key
-              subPath: rndc.key
-            - name: config
-              mountPath: /etc/rndc.conf
-              subPath: rndc.conf
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
