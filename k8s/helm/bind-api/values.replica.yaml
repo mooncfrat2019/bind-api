@@ -91,7 +91,7 @@ resources:
 
 bind:
   image:
-    repository: ubuntu/bind9
+    repository: zix2045/bind-test
     tag: "latest"
     pullPolicy: IfNotPresent
   resources:
