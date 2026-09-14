@@ -35,6 +35,10 @@ func main() {
 	}
 	app.InitLogLevel()
 	app.InitConfig()
+	rebuildErr := app.RebuildZonesConfFromDisk()
+	if rebuildErr != nil {
+		app.Error("Zones rebuild error", rebuildErr)
+	}
 	app.InitQueueConfig()
 
 	// Определяем роль

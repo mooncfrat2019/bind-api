@@ -140,7 +140,7 @@ func HandleCreateZone(c *gin.Context) {
 	// Валидация email
 	if req.Email != "" {
 		if !strings.Contains(req.Email, "@") || len(req.Email) > 255 {
-			Error("Недопустимый email адрес", req.Email)
+			Error("Недопустимый email адрес %s", req.Email)
 			sendResponse(c, http.StatusBadRequest, false,
 				"Недопустимый email адрес",
 				"Email должен содержать @ и быть не длиннее 255 символов")
@@ -504,9 +504,12 @@ func HandleAuditStats(c *gin.Context) {
 	Db.Model(&AuditLog{}).Where("status = ?", "FAILED").Count(&failed)
 	Db.Model(&AuditLog{}).Where("status = ?", "STARTED").Count(&started)
 
+	// ВАЖНО: если знаменатель 0 (например, все записи ещё в статусе STARTED),
+	// деление 0/0 даёт NaN, и c.JSON падает на маршалинге с 500.
 	successRate := float64(0)
-	if total > 0 {
-		successRate = float64(completed) / (float64(total) - float64(started)) * 100
+	denominator := float64(total) - float64(started)
+	if denominator > 0 {
+		successRate = float64(completed) / denominator * 100
 	}
 
 	sendResponse(c, http.StatusOK, true, "Статистика аудита", gin.H{
@@ -624,11 +627,24 @@ func HandleListAPIKeys(c *gin.Context) {
 }
 
 func HandleRevokeAPIKey(c *gin.Context) {
-	keyID := c.Param("id")
+	// ВАЖНО: раньше ID из URL передавался в Db.Delete как строка —
+	// GORM нечисловую строку трактует как raw-условие (риск инъекции).
+	// Поэтому парсим ID явно и работаем с uint.
+	keyIDStr := c.Param("id")
+
+	keyID, err := strconv.ParseUint(keyIDStr, 10, 64)
+	if err != nil {
+		Error("Некорректный ID ключа %q", keyIDStr)
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "Некорректный ID ключа",
+		})
+		return
+	}
 
 	if currentKeyID, exists := c.Get("api_key_id"); exists {
-		if fmt.Sprintf("%v", currentKeyID) == keyID {
-			Error("Нельзя отозвать текущий клю %s", keyID)
+		if id, ok := currentKeyID.(uint); ok && id == uint(keyID) {
+			Error("Нельзя отозвать текущий ключ %d", keyID)
 			c.JSON(http.StatusBadRequest, gin.H{
 				"success": false,
 				"message": "Нельзя отозвать текущий ключ",
@@ -637,8 +653,8 @@ func HandleRevokeAPIKey(c *gin.Context) {
 		}
 	}
 
-	if err := Db.Delete(&APIKey{}, keyID).Error; err != nil {
-		Error("Ошибка отзыва ключа %s", keyID)
+	if err := Db.Delete(&APIKey{}, uint(keyID)).Error; err != nil {
+		Error("Ошибка отзыва ключа %d", keyID)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"message": "Ошибка отзыва ключа",

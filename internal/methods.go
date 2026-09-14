@@ -96,7 +96,7 @@ func InitDatabase() error {
 		return nil
 	}
 
-	var err error
+	var lastErr error
 	var dsn string
 
 	if DbURL != "" {
@@ -112,23 +112,26 @@ func InitDatabase() error {
 
 	maxRetries := 5
 	for i := 0; i < maxRetries; i++ {
-		Db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
+		db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
 			Logger: NewGORMLogger(),
 		})
 		if err != nil {
+			lastErr = err
 			Error("Ошибка подключения (попытка %d/%d): %v", i+1, maxRetries, err)
 			time.Sleep(2 * time.Second)
 			continue
 		}
 
-		sqlDB, err := Db.DB()
+		sqlDB, err := db.DB()
 		if err != nil {
+			lastErr = err
 			Error("Ошибка получения SQL DB: %v", err)
 			time.Sleep(2 * time.Second)
 			continue
 		}
 
 		if err = sqlDB.Ping(); err != nil {
+			lastErr = err
 			Error("Ошибка ping (попытка %d/%d): %v", i+1, maxRetries, err)
 			time.Sleep(2 * time.Second)
 			continue
@@ -138,8 +141,16 @@ func InitDatabase() error {
 		sqlDB.SetMaxIdleConns(5)
 		sqlDB.SetConnMaxLifetime(5 * time.Minute)
 
+		Db = db
+		lastErr = nil
 		Info("Успешное подключение к PostgreSQL")
 		break
+	}
+
+	// Fail-fast: без БД мастер работать не может. Раньше здесь был
+	// nil-dereference в Db.AutoMigrate, потому что Db мог остаться nil.
+	if Db == nil {
+		return fmt.Errorf("не удалось подключиться к PostgreSQL после %d попыток: %v", maxRetries, lastErr)
 	}
 
 	Info("Выполнение миграций базы данных...")
@@ -151,9 +162,6 @@ func InitDatabase() error {
 		Error("Ошибка миграции ключей: %v", err)
 	}
 
-	if err != nil {
-		return fmt.Errorf("не удалось подключиться к PostgreSQL после %d попыток: %v", maxRetries, err)
-	}
 	var count int64
 	Db.Model(&APIKey{}).Count(&count)
 	if count == 0 {
@@ -174,7 +182,7 @@ func InitDatabase() error {
 
 			keyHash, errHash := hashAPIKey(bootstrapKey)
 			if errHash != nil {
-				return fmt.Errorf("ошибка хеширования bootstrap ключа: %v", err)
+				return fmt.Errorf("ошибка хеширования bootstrap ключа: %v", errHash)
 			}
 
 			defaultKey := &APIKey{

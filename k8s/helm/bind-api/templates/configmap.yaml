@@ -89,6 +89,10 @@ data:
   # Пути
   BIND_ZONE_DIR: "/var/named/"
   BIND_NAMED_CONF: "/etc/named.conf"
+  BIND_ZONE_CONF: "/etc/named.zones.conf"
+  # WAL асинхронного буфера кладём на постоянный том зон (PVC /var/named),
+  # чтобы он переживал пересоздание пода и не давал дублей после рестарта.
+  BIND_API_WAL_PATH: "/var/named/.state/bind-api-wal.log"
 
   # PostgreSQL
   {{- if .Values.postgresql.enabled }}

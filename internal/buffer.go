@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -51,7 +52,9 @@ func InitAsyncBuffer() {
 		walPath:   walPath,
 	}
 
-	// Восстанавливаем из WAL при старте
+	// Восстанавливаем из WAL при старте. Файл НЕ обрезаем — его содержимое
+	// должно совпадать с b.pending, чтобы падение до первого flush
+	// не привело к потере записей.
 	if walFile != nil {
 		RecordBuffer.recoverFromWAL()
 	}
@@ -61,17 +64,19 @@ func InitAsyncBuffer() {
 		BatchSize, BatchInterval, walPath)
 }
 
-// recoverFromWAL восстанавливает данные из WAL после рестарта
+// recoverFromWAL восстанавливает данные из WAL после рестарта.
+// ВАЖНО: WAL не обрезается. Обрезка (точнее — перезапись ровно по pending)
+// происходит только после успешного сброса в файлы зон, см. rewriteWAL.
 func (b *AsyncRecordBuffer) recoverFromWAL() {
 	if b.walFile == nil {
 		return
 	}
 
-	// Синхронизируем и закрываем перед чтением
-	b.walFile.Sync()
-	b.walFile.Close()
+	// Гарантируем, что все ранее записанные данные уже на диске
+	if err := b.walFile.Sync(); err != nil {
+		Error("Не удалось синхронизировать WAL %s: %v", b.walPath, err)
+	}
 
-	// Читаем WAL файл (используем os.ReadFile вместо ioutil.ReadFile)
 	content, err := os.ReadFile(b.walPath)
 	if err != nil {
 		Error("Не удалось прочитать WAL файл %s: %v", b.walPath, err)
@@ -94,26 +99,24 @@ func (b *AsyncRecordBuffer) recoverFromWAL() {
 		}
 	}
 
-	// Очищаем WAL
-	os.Truncate(b.walPath, 0)
-
-	// Переоткрываем файл для записи
-	walFile, err := os.OpenFile(b.walPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		Error("Не удалось переоткрыть WAL файл: %v", err)
-		b.walFile = nil
-	} else {
-		b.walFile = walFile
-	}
-
 	if recoveredCount > 0 {
 		Info("Восстановлено %d записей из WAL", recoveredCount)
-		go b.flush()
+		// Сигналим воркеру сбросить восстановленные записи как можно скорее.
+		// Сам flush здесь не вызываем: воркер ещё не запущен.
+		select {
+		case b.flushCh <- struct{}{}:
+		default:
+		}
 	}
 }
 
-// Add добавляет запись в буфер
+// Add добавляет запись в буфер.
+// WAL и pending изменяются под ОДНИМ мьютексом b.mu, чтобы они никогда
+// не разъезжались между собой.
 func (b *AsyncRecordBuffer) Add(zoneName, recordLine string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	// Пишем в WAL для надежности
 	if b.walFile != nil {
 		walEntry := fmt.Sprintf("%s|%s\n", zoneName, recordLine)
@@ -122,10 +125,8 @@ func (b *AsyncRecordBuffer) Add(zoneName, recordLine string) {
 		}
 	}
 
-	b.mu.Lock()
 	b.pending[zoneName] = append(b.pending[zoneName], recordLine)
 	batchSize := len(b.pending[zoneName])
-	b.mu.Unlock()
 
 	// Если накопилось достаточно - сигналим
 	if batchSize >= b.batchSize {
@@ -150,43 +151,116 @@ func (b *AsyncRecordBuffer) worker() {
 	}
 }
 
+// flush сбрасывает накопленные записи в файлы зон.
+// Неудачные записи возвращаются в b.pending для повторной попытки.
+// После сброса WAL перезаписывается так, чтобы ровно соответствовать b.pending.
 func (b *AsyncRecordBuffer) flush() {
 	b.mu.Lock()
+	if len(b.pending) == 0 {
+		b.mu.Unlock()
+		return
+	}
 	toFlush := b.pending
 	b.pending = make(map[string][]string)
 	b.mu.Unlock()
 
+	// Параллельная запись по зонам
+	var wg sync.WaitGroup
+	var failedMu sync.Mutex
+	failed := make(map[string][]string)
+
 	for zoneName, records := range toFlush {
-		go b.writeToZone(zoneName, records) // Параллельная запись
+		wg.Add(1)
+		go func(zoneName string, records []string) {
+			defer wg.Done()
+			if err := b.writeToZone(zoneName, records); err != nil {
+				Error("async buffer flush error: %s: %v", zoneName, err)
+				failedMu.Lock()
+				failed[zoneName] = append(failed[zoneName], records...)
+				failedMu.Unlock()
+			}
+		}(zoneName, records)
 	}
+	wg.Wait()
+
+	// Возвращаем неудачные записи в pending, чтобы повторить их позже
+	if len(failed) > 0 {
+		b.mu.Lock()
+		for zoneName, records := range failed {
+			b.pending[zoneName] = append(b.pending[zoneName], records...)
+		}
+		b.mu.Unlock()
+	}
+
+	// WAL теперь должен содержать ТОЛЬКО то, что ещё не записано в зоны
+	b.rewriteWAL()
 }
 
-func (b *AsyncRecordBuffer) writeToZone(zoneName string, records []string) {
+// writeToZone записывает набор строк в файл зоны и увеличивает serial.
+// Возвращает ошибку, чтобы flush мог вернуть запись в очередь на повтор.
+func (b *AsyncRecordBuffer) writeToZone(zoneName string, records []string) error {
 	zone, exists := getZoneFromConfig(zoneName)
 	if !exists {
-		return
+		return fmt.Errorf("зона %s не найдена в конфиге", zoneName)
 	}
 
 	err := withFileLock(zone.File, func() error {
 		for _, record := range records {
-			errAppend := appendRecordToFile(zone.File, record)
-			if errAppend != nil {
-				Error("async buffer append record error: %s, %v, %v", zoneName, records, errAppend)
+			if errAppend := appendRecordToFile(zone.File, record); errAppend != nil {
+				return fmt.Errorf("append record error: %w", errAppend)
 			}
 		}
-		errSerial := incrementSerial(zone.File)
-		if errSerial != nil {
-			Error("async buffer increment serial error: %s, %v, %v", zoneName, records, errSerial)
+		if errSerial := incrementSerial(zone.File); errSerial != nil {
+			return fmt.Errorf("increment serial error: %w", errSerial)
 		}
 		return nil
 	})
 	if err != nil {
-		Error("async buffer record error: %s, %v, %v", zoneName, records, err)
+		return err
 	}
 
-	errPermissions := fixPermissions(zone.File)
-	if errPermissions != nil {
-		Error("async buffer error permissions error: %s, %v, %v", zoneName, records, errPermissions)
+	if errPermissions := fixPermissions(zone.File); errPermissions != nil {
+		Error("async buffer fix permissions error: %s: %v", zoneName, errPermissions)
 	}
+
 	PendingReload = true
+	return nil
+}
+
+// rewriteWAL перезаписывает WAL так, чтобы его содержимое ровно совпадало
+// с текущим содержимым b.pending. Выполняется ПОД ТЕМ ЖЕ мьютексом b.mu,
+// что и Add, поэтому WAL и pending не могут разойтись.
+//
+// Файл открыт с O_APPEND: после Truncate(0) очередная запись уходит в начало.
+func (b *AsyncRecordBuffer) rewriteWAL() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.walFile == nil {
+		return
+	}
+
+	// Собираем актуальное содержимое из pending (единственный источник истины)
+	var sb strings.Builder
+	for zoneName, records := range b.pending {
+		for _, record := range records {
+			sb.WriteString(zoneName)
+			sb.WriteString("|")
+			sb.WriteString(record)
+			sb.WriteString("\n")
+		}
+	}
+
+	// Полностью обрезаем файл и записываем актуальное состояние
+	if err := b.walFile.Truncate(0); err != nil {
+		Error("Ошибка очистки WAL: %v", err)
+		return
+	}
+	if _, err := b.walFile.WriteString(sb.String()); err != nil {
+		Error("Ошибка перезаписи WAL: %v", err)
+		return
+	}
+	if err := b.walFile.Sync(); err != nil {
+		Error("Ошибка sync WAL: %v", err)
+	}
 }
