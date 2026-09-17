@@ -1,0 +1,208 @@
+# =============================================================================
+# ЕДИНЫЙ values-файл. Один релиз ставит сразу и мастер, и реплики.
+#
+# Установка:
+#   helm upgrade --install bind-api ./k8s/helm/bind-api \
+#     -n bind-dns --create-namespace \
+#     -f k8s/helm/bind-api/values.all.yaml
+#
+# Секреты в проде передавайте поверх (--set / SOPS):
+#   --set secrets.syncToken=$SYNC_TOKEN \
+#   --set secrets.masterApiToken=$SYNC_TOKEN \
+#   --set secrets.rndcKeySecret=$RNDC_KEY
+# =============================================================================
+
+global:
+  namespace: bind-dns
+  storageClass: "hdd.network-drives.csi.timeweb.cloud"
+
+# === Образ BIND-API (один и тот же для master и replica) ===
+image:
+  repository: zix2045/bind-api
+  tag: latest
+  pullPolicy: Always
+
+# === Образ BIND 9 ===
+bind:
+  image:
+    repository: ubuntu/bind9
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  config:
+    allowRecursion:
+      - "10.0.0.0/8"
+      - "172.16.0.0/12"
+      - "192.168.0.0/16"
+    allowTransfer:
+      - "10.0.0.0/8"   # ВАЖНО: должно покрывать подсеть подов реплик (для AXFR)
+    listenOn:
+      - "any"
+    listenOnV6:
+      - "any"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# === Что ставим в этом релизе ===
+replicaCount:
+  master: 1
+  replica: 2
+
+# === Ресурсы BIND-API ===
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+# === Встроенный PostgreSQL (только на мастере) ===
+postgresql:
+  enabled: true
+  auth:
+    postgresPassword: "test-superuser-password"
+    username: bindapi
+    password: "test-bindapi-password"
+    database: bind_api
+  primary:
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClass: "hdd.network-drives.csi.timeweb.cloud"
+      createPV: false
+      hostPath: ""
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 2000m
+        memory: 4Gi
+
+# === Внешний PostgreSQL (если postgresql.enabled = false) ===
+externalPostgresql:
+  enabled: false
+  host: ""
+  port: "5432"
+  user: ""
+  password: ""
+  database: "bind_api"
+  sslMode: "disable"
+  schema: "public"
+
+# === Мастер: адреса для реплик (пусто -> шаблон соберёт сам) ===
+master:
+  url: ""
+  ip: ""
+
+# === Хранилище для зон ===
+zonesStorage:
+  enabled: true
+  size: 20Gi
+  storageClass: "hdd.network-drives.csi.timeweb.cloud"
+  accessModes:
+    - ReadWriteOnce
+  createPV: false
+  hostPath: ""
+
+# === Секреты ===
+# syncToken И masterApiToken должны быть РАВНЫ (одна и та же строка):
+#   syncToken       — токен, который мастер проверяет у реплик (X-Sync-Token)
+#   masterApiToken  — токен, который реплики шлют мастеру (X-Sync-Token)
+# При одном релизе они оба лежат в одном Secret, но задать их всё равно надо
+# одинаковыми значениями.
+secrets:
+  postgresPassword: "test-bindapi-password"
+  bootstrapKey: "test-bootstrap-key-min-32-chars-long-secure"
+  syncToken: "test-sync-token-value"
+  masterApiToken: "test-sync-token-value"
+  rndcKeySecret: "sbfd/SodkW6YqB0R9gUFhvMPgXpjeTJdrDkIskjtFQs="
+
+# === Конфигурация приложения ===
+config:
+  logLevel: INFO
+  apiPort: ":8080"
+  queue:
+    maxSize: 1000
+    workerTimeout: 180
+    batchSize: 50
+    batchInterval: 5
+    thresholdLow: 0.1
+    thresholdHigh: 0.3
+    reloadInterval: 10
+  sync:
+    cleanupInterval: "5m"
+    interval: 30
+    subnet: "10.0.0.0/8"
+    allowInsecure: true
+
+# === Сервисы ===
+service:
+  dns:
+    type: LoadBalancer
+  api:
+    type: LoadBalancer
+    port: 8080
+    externalTrafficPolicy: Local
+    annotations: {}
+
+# === Ingress ===
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  hosts:
+    - host: bind-api.your-domain.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# === ServiceAccount / RBAC ===
+serviceAccount:
+  create: true
+rbac:
+  create: true
+
+# === PDB ===
+pdb:
+  enabled: true
+  minAvailable: 1
+
+# === Monitoring ===
+monitoring:
+  enabled: false
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+
+# === Probes ===
+probes:
+  liveness:
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+# === Security Context ===
+securityContext:
+  runAsUser: 0
+  runAsGroup: 0
+  fsGroup: 0
+
+# === Планирование ===
+affinity: {}
+nodeSelector: {}
+tolerations: []

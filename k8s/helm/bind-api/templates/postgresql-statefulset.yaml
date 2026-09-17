@@ -1,4 +1,4 @@
-{{- if and .Values.postgresql.enabled (eq .Values.role "master") }}
+{{- if and .Values.postgresql.enabled (gt (int .Values.replicaCount.master) 0) }}
 {{- $persistence := .Values.postgresql.primary.persistence }}
 apiVersion: apps/v1
 kind: StatefulSet
@@ -75,8 +75,6 @@ spec:
           emptyDir: {}
       {{- end }}
   {{- if $persistence.enabled }}
-  # Том создаётся контроллером StatefulSet (postgres-data-<sts>-0).
-  # НЕ дублируйте этот том в pod.spec.volumes — контроллер всё равно его перезапишет.
   volumeClaimTemplates:
     - metadata:
         name: postgres-data

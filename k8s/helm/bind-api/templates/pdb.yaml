@@ -1,6 +1,6 @@
-{{- if .Values.pdb }}
-{{- if .Values.pdb.enabled }}
-{{- if eq .Values.role "master" }}
+{{- if and .Values.pdb .Values.pdb.enabled }}
+{{- if gt (int .Values.replicaCount.master) 0 }}
+---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -16,7 +16,9 @@ spec:
     matchLabels:
       {{- include "bind-api.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: master
-{{- else if eq .Values.role "replica" }}
+{{- end }}
+{{- if gt (int .Values.replicaCount.replica) 0 }}
+---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -32,6 +34,5 @@ spec:
     matchLabels:
       {{- include "bind-api.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: replica
-{{- end }}
 {{- end }}
 {{- end }}

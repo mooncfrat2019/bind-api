@@ -1,4 +1,4 @@
-{{- if and .Values.zonesStorage.enabled (eq .Values.role "master") .Values.zonesStorage.createPV }}
+{{- if and .Values.zonesStorage.enabled (gt (int .Values.replicaCount.master) 0) .Values.zonesStorage.createPV }}
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -21,9 +21,9 @@ spec:
         - matchExpressions:
             - key: kubernetes.io/hostname
               operator: Exists
-{{- end }}
 ---
-{{- if and .Values.postgresql.enabled (eq .Values.role "master") .Values.postgresql.primary.persistence.createPV }}
+{{- end }}
+{{- if and .Values.postgresql.enabled (gt (int .Values.replicaCount.master) 0) .Values.postgresql.primary.persistence.createPV }}
 apiVersion: v1
 kind: PersistentVolume
 metadata:

@@ -1,9 +1,8 @@
-{{- if and .Values.postgresql.enabled (eq .Values.role "master") }}
+{{- if and .Values.postgresql.enabled (gt (int .Values.replicaCount.master) 0) }}
 ---
 # Headless-сервис (serviceName для StatefulSet). Именно на это имя смотрит приложение.
 # publishNotReadyAddresses=true — DNS-имя резолвится сразу после старта пода,
-# не дожидаясь прохождения readinessProbe (иначе headless-сервис отдаёт NXDOMAIN
-# и приложение падает с "no such host").
+# не дожидаясь readinessProbe.
 apiVersion: v1
 kind: Service
 metadata:

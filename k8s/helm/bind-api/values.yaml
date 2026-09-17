@@ -1,37 +1,44 @@
-# === Глобальные настройки ===
+# =============================================================================
+# Дефолтные значения чарта bind-api.
+#
+# Роль больше НЕ задаётся через .Values.role. Один релиз может содержать
+# и мастер-набор, и реплики. Что именно создавать, определяется полями
+# replicaCount.master и replicaCount.replica:
+#   master: 0  -> мастер-набор (StatefulSet, Service, PostgreSQL) НЕ создаётся
+#   replica: 0 -> набор реплик НЕ создаётся
+#
+# Для продакшена используйте values.all.yaml, а не этот файл напрямую.
+# =============================================================================
+
 global:
   namespace: bind-dns
   imageRegistry: ""
   storageClass: ""
 
-# === Настройки образа BIND-API ===
+# === Образ BIND-API ===
 image:
   repository: zix2045/bind-api
   tag: latest
   pullPolicy: Always
 
-# === Настройки образа BIND 9 ===
+# === Образ BIND 9 ===
 bind:
   image:
     repository: ubuntu/bind9
     tag: "latest"
     pullPolicy: IfNotPresent
-  # Конфигурация BIND
+  # Справочные значения: сам named.conf формируется в templates/configmap.yaml
   config:
-    # Разрешённые для рекурсии подсети
     allowRecursion:
       - "10.0.0.0/8"
       - "172.16.0.0/12"
       - "192.168.0.0/16"
-    # Разрешённые для трансфера зон подсети
     allowTransfer:
       - "10.0.0.0/8"
-    # Прослушиваемые интерфейсы
     listenOn:
       - "any"
     listenOnV6:
       - "any"
-  # Ресурсы для контейнера BIND
   resources:
     requests:
       cpu: 100m
@@ -40,15 +47,12 @@ bind:
       cpu: 500m
       memory: 512Mi
 
-# === Роль сервера (master или replica) ===
-role: master
-
-# === Количество реплик ===
+# === Что ставить в этом релизе ===
 replicaCount:
   master: 1
-  replica: 2
+  replica: 0
 
-# === Ресурсы для контейнера API ===
+# === Ресурсы контейнера BIND-API (общие для master и replica) ===
 resources:
   requests:
     cpu: 500m
@@ -57,7 +61,7 @@ resources:
     cpu: 2000m
     memory: 2Gi
 
-# === PostgreSQL (встроенный через subchart или внешний) ===
+# === Встроенный PostgreSQL (только на мастере) ===
 postgresql:
   enabled: true
   auth:
@@ -70,6 +74,8 @@ postgresql:
       enabled: true
       size: 5Gi
       storageClass: ""
+      createPV: false
+      hostPath: ""
     resources:
       requests:
         cpu: 1000m
@@ -80,39 +86,132 @@ postgresql:
 
 # === Внешний PostgreSQL (если postgresql.enabled = false) ===
 externalPostgresql:
-  enabled: false  # ← Включить использование внешнего PostgreSQL
-
-  # Host внешнего PostgreSQL
+  enabled: false
   host: "your-postgres-host.example.com"
-
-  # Порт (по умолчанию 5432)
   port: "5432"
-
-  # Пользователь
   user: "bindapi"
-
-  # Пароль
   password: "your-secure-password"
-
-  # Имя базы данных
   database: "bind_api"
-
-  # SSL режим (disable, require, verify-full, etc.)
   sslMode: "disable"
-
-  # Schema (по умолчанию public)
   schema: "public"
+  # existingSecret: ""
+  # existingSecretPasswordKey: "password"
+  # existingSecretUrlKey: ""
 
-  # existingSecret: ""  # ← Опционально: использовать существующий secret
-  # existingSecretPasswordKey: "password"  # ← Ключ в secret для пароля
+# === Мастер: адреса для реплик ===
+master:
+  # URL API мастера. Пусто -> шаблон соберёт
+  #   http://<fullname>-api.<namespace>.svc.cluster.local:8080
+  url: ""
+  # Адрес мастера для BIND masters { } (по нему идёт AXFR).
+  # Пусто -> <fullname>-api.<namespace>.svc.cluster.local
+  ip: ""
 
-# === Хранилище для зон ===
+# === Хранилище для зон (у каждой ноды свой PVC) ===
 zonesStorage:
   enabled: true
   size: 10Gi
   storageClass: ""
   accessModes:
     - ReadWriteOnce
-  # Создать PV вручную (для OpenEBS hostpath)
   createPV: false
-  hostPath: ""  # Путь на узле для hostPath PV
+  hostPath: ""
+
+# === Секреты ===
+# ВНИМАНИЕ: masterApiToken ОБЯЗАН совпадать с syncToken — при одном релизе
+# это единственный Secret, и реплики шлют MASTER_API_TOKEN как X-Sync-Token.
+# Всё, что должно переживать ротацию, задавайте через --set или SOPS.
+secrets:
+  postgresPassword: "CHANGE_ME_BINDAPI_PASSWORD"
+  bootstrapKey: "CHANGE_ME_BOOTSTRAP_KEY_MIN_32_CHARS_LONG"
+  syncToken: "CHANGE_ME_SYNC_TOKEN"
+  masterApiToken: "CHANGE_ME_SYNC_TOKEN"
+  rndcKeySecret: "CHANGE_ME_BASE64_RNDC_KEY"
+
+# === Конфигурация приложения ===
+config:
+  logLevel: INFO
+  apiPort: ":8080"
+  queue:
+    maxSize: 1000
+    workerTimeout: 180
+    batchSize: 50
+    batchInterval: 5
+    thresholdLow: 0.1
+    thresholdHigh: 0.3
+    reloadInterval: 10
+  sync:
+    cleanupInterval: "5m"
+    interval: 30
+    subnet: "10.0.0.0/8"
+    # MASTER_URL внутри кластера по http -> обязательно true
+    allowInsecure: true
+
+# === Сервисы ===
+service:
+  dns:
+    type: ClusterIP
+  api:
+    type: ClusterIP
+    port: 8080
+
+# === Ingress ===
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: bind-api.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# === ServiceAccount / RBAC ===
+serviceAccount:
+  create: true
+  annotations: {}
+rbac:
+  create: true
+
+# === PodDisruptionBudget ===
+pdb:
+  enabled: false
+  minAvailable: 1
+
+# === Monitoring ===
+monitoring:
+  enabled: false
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+
+# === Probes ===
+probes:
+  liveness:
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+# === Security Context ===
+securityContext:
+  runAsUser: 0
+  runAsGroup: 0
+  fsGroup: 0
+
+# === Планирование ===
+affinity: {}
+nodeSelector: {}
+tolerations: []
+
+# === Дополнительные тома/маунты ===
+extraVolumes: []
+extraVolumeMounts: []

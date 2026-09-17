@@ -1,4 +1,4 @@
-{{- if eq .Values.role "master" }}
+{{- if gt (int .Values.replicaCount.master) 0 }}
 {{- $useExistingSecret := and .Values.externalPostgresql.enabled (not (empty .Values.externalPostgresql.existingSecret)) }}
 apiVersion: apps/v1
 kind: StatefulSet
@@ -84,11 +84,9 @@ spec:
             - |
               set -eu
 
-              # Копируем конфиги из ConfigMap в writable каталог /config
               cp /config-src/named.conf /config/named.conf
               cp /config-src/named.zones.conf /config/named.zones.conf
 
-              # Читаем ключ из Secret и собираем rndc.conf / rndc.key
               RNDC_KEY=$(cat /rndc-src/rndc.key)
 
               cat > /config/rndc.conf << EOF

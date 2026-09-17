@@ -64,6 +64,20 @@ Create the name of the service account to use
 {{- end }}
 
 {{/*
+Master / replica enabled flags.
+Роль больше не управляется .Values.role. Наличие набора определяется
+replicaCount.master / replicaCount.replica:
+  0 -> набор не создаётся.
+*/}}
+{{- define "bind-api.masterEnabled" -}}
+{{- if gt (int (.Values.replicaCount).master) 0 }}true{{- end }}
+{{- end }}
+
+{{- define "bind-api.replicaEnabled" -}}
+{{- if gt (int (.Values.replicaCount).replica) 0 }}true{{- end }}
+{{- end }}
+
+{{/*
 Return the appropriate API port
 */}}
 {{- define "bind-api.apiPort" -}}
@@ -77,66 +91,59 @@ Return the appropriate API port
 {{- end }}
 
 {{/*
-Return the master URL for replicas
+Master URL for replicas.
+Указывает на ClusterIP-сервис API мастера (<fullname>-api).
+Это обычный Service, а не headless-под, поэтому адрес переживает
+пересоздание пода мастера и не зависит от имени релиза.
 */}}
 {{- define "bind-api.masterUrl" -}}
-{{- if .Values.master }}
-{{- if .Values.master.url }}
+{{- if and .Values.master .Values.master.url }}
 {{- .Values.master.url }}
 {{- else }}
-{{- printf "http://%s-master-0.%s-master.%s.svc.cluster.local:%s"
-  .Release.Name
-  .Release.Name
-  .Release.Namespace
-  (include "bind-api.apiPort" .) }}
-{{- end }}
-{{- else }}
-{{- printf "http://%s-master-0.%s-master.%s.svc.cluster.local:%s"
-  .Release.Name
-  .Release.Name
+{{- printf "http://%s-api.%s.svc.cluster.local:%s"
+  (include "bind-api.fullname" .)
   .Release.Namespace
   (include "bind-api.apiPort" .) }}
 {{- end }}
 {{- end }}
 
 {{/*
-PostgreSQL host
+Адрес мастера для директивы BIND masters { } (источник AXFR).
+*/}}
+{{- define "bind-api.replicaMasterIP" -}}
+{{- if and .Values.master .Values.master.ip }}
+{{- .Values.master.ip }}
+{{- else }}
+{{- printf "%s-api.%s.svc.cluster.local" (include "bind-api.fullname" .) .Release.Namespace }}
+{{- end }}
+{{- end }}
+
+{{/*
+PostgreSQL host — привязан к fullname, а не к имени релиза.
 */}}
 {{- define "bind-api.postgresqlHost" -}}
 {{- if .Values.postgresql.enabled }}
-{{- if .Values.postgresql.fullnameOverride }}
-{{- .Values.postgresql.fullnameOverride }}
-{{- else }}
-{{- printf "%s-postgresql" .Release.Name }}
-{{- end }}
-{{- else }}
-{{- if .Values.externalPostgresql }}
+{{- printf "%s-postgresql" (include "bind-api.fullname" .) }}
+{{- else if .Values.externalPostgresql.enabled }}
 {{- .Values.externalPostgresql.host }}
 {{- else }}
 {{- "localhost" }}
 {{- end }}
 {{- end }}
-{{- end }}
 
 {{/*
-Storage class
+Storage class: приоритет global.storageClass, затем zonesStorage.storageClass.
 */}}
 {{- define "bind-api.storageClass" -}}
-{{- if .Values.global }}
-{{- if .Values.global.storageClass }}
+{{- if and .Values.global .Values.global.storageClass }}
 {{- .Values.global.storageClass }}
-{{- else }}
-{{- if .Values.zonesStorage }}
-{{- if .Values.zonesStorage.storageClass }}
+{{- else if and .Values.zonesStorage .Values.zonesStorage.storageClass }}
 {{- .Values.zonesStorage.storageClass }}
 {{- end }}
 {{- end }}
-{{- end }}
-{{- end }}
-{{- end }}
 
 {{/*
-BIND allow-recursion string
+BIND allow-recursion string (справочно; сам named.conf формируется в configmap.yaml).
 */}}
 {{- define "bind-api.bindAllowRecursion" -}}
 {{- $list := list }}
@@ -157,7 +164,7 @@ BIND allow-recursion string
 {{- end }}
 
 {{/*
-BIND allow-transfer string
+BIND allow-transfer string (справочно).
 */}}
 {{- define "bind-api.bindAllowTransfer" -}}
 {{- $list := list }}

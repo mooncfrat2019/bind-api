@@ -1,4 +1,4 @@
-{{- if eq .Values.role "replica" }}
+{{- if gt (int .Values.replicaCount.replica) 0 }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -115,14 +115,20 @@ spec:
           resources:
             {{- toYaml .Values.bind.resources | nindent 12 }}
           livenessProbe:
-            tcpSocket:
-              port: 53
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "kill -0 $(cat /var/named/named.pid 2>/dev/null) 2>/dev/null"
             initialDelaySeconds: 30
             periodSeconds: 10
             timeoutSeconds: 5
           readinessProbe:
-            tcpSocket:
-              port: 53
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "dig @127.0.0.1 . > /dev/null 2>&1"
             initialDelaySeconds: 10
             periodSeconds: 5
             timeoutSeconds: 3
@@ -150,7 +156,8 @@ spec:
                 secretKeyRef:
                   name: {{ include "bind-api.fullname" . }}-secrets
                   key: MASTER_URL
-            # Должен совпадать с SYNC_API_TOKEN мастера
+            # MASTER_API_TOKEN должен совпадать с SYNC_API_TOKEN мастера.
+            # В едином релизе оба лежат в одном Secret — расхождение исключено.
             - name: MASTER_API_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -162,7 +169,7 @@ spec:
                   name: {{ include "bind-api.fullname" . }}-secrets
                   key: SYNC_API_TOKEN
             - name: REPLICA_MASTER_IP
-              value: {{ .Values.master.ip | default "" | quote }}
+              value: {{ include "bind-api.replicaMasterIP" . | quote }}
             - name: REPLICA_ZONE_TYPE
               value: "slave"
             - name: REPLICA_ZONE_SUBDIR
