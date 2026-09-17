@@ -98,7 +98,7 @@ externalPostgresql:
   # existingSecretPasswordKey: "password"
   # existingSecretUrlKey: ""
 
-# === Мастер: адреса для реплик ===
+# === Мастер: адреса и параметры ожидания для реплик ===
 master:
   # URL API мастера. Пусто -> шаблон соберёт
   #   http://<fullname>-api.<namespace>.svc.cluster.local:8080
@@ -106,6 +106,8 @@ master:
   # Адрес мастера для BIND masters { } (по нему идёт AXFR).
   # Пусто -> <fullname>-api.<namespace>.svc.cluster.local
   ip: ""
+  # Сколько секунд init-контейнер реплики ждёт готовности API мастера.
+  waitTimeoutSeconds: 900
 
 # === Хранилище для зон (у каждой ноды свой PVC) ===
 zonesStorage:

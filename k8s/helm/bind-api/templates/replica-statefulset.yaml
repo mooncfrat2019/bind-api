@@ -32,6 +32,55 @@ spec:
       securityContext:
         {{- toYaml .Values.securityContext | nindent 8 }}
       initContainers:
+        {{- /*
+          Шлюз порядка установки. В едином релизе мастер и реплики создаются
+          одновременно, поэтому без этого шага реплика пытается синхронизироваться
+          с сервисом, у которого ещё нет Ready-эндпоинтов.
+
+          Ждём /health мастера через ClusterIP-сервис <fullname>-api.
+          Он начинает отвечать только после прохождения readinessProbe мастером
+          (а мастер до этого сам ждёт PostgreSQL через wait-for-postgres).
+
+          Контейнер выполняется ДО init-config и тем более до основного bind-api,
+          поэтому реплика не стартует раньше мастера.
+        */}}
+        {{- if gt (int .Values.replicaCount.master) 0 }}
+        - name: wait-for-master
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+
+              MASTER_HEALTH="{{ include "bind-api.masterUrl" . }}/health"
+              TIMEOUT="{{ .Values.master.waitTimeoutSeconds | default 900 }}"
+
+              echo "Waiting for master API at ${MASTER_HEALTH} (timeout: ${TIMEOUT}s)..."
+              start=$(date +%s)
+
+              until curl -fsS --max-time 5 "${MASTER_HEALTH}" >/dev/null 2>&1; do
+                now=$(date +%s)
+                elapsed=$((now - start))
+
+                if [ "${elapsed}" -ge "${TIMEOUT}" ]; then
+                  echo "ERROR: master API is not ready after ${TIMEOUT}s, aborting" >&2
+                  exit 1
+                fi
+
+                if [ $((elapsed % 30)) -lt 2 ]; then
+                  echo "still waiting for master... (${elapsed}s elapsed)"
+                fi
+
+                sleep 2
+              done
+
+              echo "Master API is ready"
+          securityContext:
+            runAsUser: 0
+        {{- end }}
+
         # /config должен быть РЕАЛЬНЫМ writable каталогом: ReplicaSync
         # переписывает named.conf / named.zones.conf через os.Rename.
         - name: init-config

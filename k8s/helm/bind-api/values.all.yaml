@@ -4,12 +4,10 @@
 # Установка:
 #   helm upgrade --install bind-api ./k8s/helm/bind-api \
 #     -n bind-dns --create-namespace \
-#     -f k8s/helm/bind-api/values.all.yaml
-#
-# Секреты в проде передавайте поверх (--set / SOPS):
-#   --set secrets.syncToken=$SYNC_TOKEN \
-#   --set secrets.masterApiToken=$SYNC_TOKEN \
-#   --set secrets.rndcKeySecret=$RNDC_KEY
+#     -f k8s/helm/bind-api/values.all.yaml \
+#     --set secrets.syncToken=$SYNC_TOKEN \
+#     --set secrets.masterApiToken=$SYNC_TOKEN \
+#     --set secrets.rndcKeySecret=$RNDC_KEY
 # =============================================================================
 
 global:
@@ -95,10 +93,17 @@ externalPostgresql:
   sslMode: "disable"
   schema: "public"
 
-# === Мастер: адреса для реплик (пусто -> шаблон соберёт сам) ===
+# === Мастер: адреса и параметры ожидания для реплик ===
 master:
+  # URL API мастера. Пусто -> шаблон соберёт
+  #   http://<fullname>-api.<namespace>.svc.cluster.local:8080
   url: ""
+  # Адрес мастера для BIND masters { } (по нему идёт AXFR).
+  # Пусто -> <fullname>-api.<namespace>.svc.cluster.local
   ip: ""
+  # Сколько секунд init-контейнер реплики ждёт готовности API мастера.
+  # Мастер сам ждёт PostgreSQL до ~5 минут, поэтому 900с покрывает холодный старт.
+  waitTimeoutSeconds: 900
 
 # === Хранилище для зон ===
 zonesStorage:
@@ -206,3 +211,7 @@ securityContext:
 affinity: {}
 nodeSelector: {}
 tolerations: []
+
+# === Дополнительные тома/маунты ===
+extraVolumes: []
+extraVolumeMounts: []
