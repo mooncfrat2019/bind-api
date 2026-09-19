@@ -1,4 +1,8 @@
 {{- if gt (int .Values.replicaCount.master) 0 }}
+# ─── Внешний DNS-сервис ──────────────────────────────────────────────────────
+# Порт 53 TCP+UDP. Наружу отдаётся master-подом.
+# Если отдаёте через LoadBalancer — учтите: UDP-LB поддерживают не все
+# провайдеры. NodePort работает всегда, но клиентам нужен IP ноды.
 apiVersion: v1
 kind: Service
 metadata:
@@ -33,7 +37,8 @@ spec:
       name: dns-udp
       protocol: UDP
 ---
-# DNS Service - внутренний доступ (ClusterIP), селектит только мастер
+# ─── Внутренний DNS-сервис (ClusterIP) ───────────────────────────────────────
+# Для клиентов внутри кластера: CoreDNS forwarding, pod dnsConfig и т.п.
 apiVersion: v1
 kind: Service
 metadata:

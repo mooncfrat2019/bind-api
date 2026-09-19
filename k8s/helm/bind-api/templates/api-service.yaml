@@ -1,7 +1,7 @@
 {{- if gt (int .Values.replicaCount.master) 0 }}
-# Селектит ТОЛЬКО мастера: этот сервис используется как MASTER_URL репликами
-# и как внешняя точка входа для API. Добавлять сюда component: replica нельзя —
-# реплики не регистрируют /api/sync/*, /api/write/* и /api/keys/*.
+# Селектит ТОЛЬКО мастер: этот сервис используется как MASTER_URL репликами
+# и как внешняя точка входа для HTTP API. Реплики не регистрируют /api/sync/*,
+# /api/write/*, /api/keys/* — добавлять их в селект нельзя.
 apiVersion: v1
 kind: Service
 metadata:
@@ -14,11 +14,17 @@ spec:
   {{- if eq .Values.service.api.type "LoadBalancer" }}
   externalTrafficPolicy: {{ .Values.service.api.externalTrafficPolicy | default "Local" }}
   {{- end }}
+  {{- if eq .Values.service.api.type "NodePort" }}
+  externalTrafficPolicy: {{ .Values.service.api.externalTrafficPolicy | default "Local" }}
+  {{- end }}
   selector:
     {{- include "bind-api.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: master
   ports:
     - port: {{ .Values.service.api.port }}
+      {{- if eq .Values.service.api.type "NodePort" }}
+      nodePort: {{ .Values.service.api.nodePort | default 30080 }}
+      {{- end }}
       targetPort: api
       name: api
 {{- end }}
