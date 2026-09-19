@@ -1,0 +1,130 @@
+# =============================================================================
+# BIND 9 на базе RedOS 8 (registry.red-soft.ru/redos8c/ubi:latest)
+#
+# Замена ubuntu/bind9 в чарте bind-api. Один и тот же образ используется
+# в поде двумя контейнерами:
+#   1. bind9       — command: ["/usr/sbin/named","-g","-c","/config/named.conf"]
+#   2. init-config — command: ["/bin/sh","-c","..."] — копирует конфиги в /config,
+#                    генерирует rndc.conf/rndc.key, создаёт каталоги зон
+#
+# Сборка:
+#   docker build  -f Dockerfile.bind9 -t zix2045/bind-redos:latest .
+#   docker buildx build --platform linux/amd64 \
+#     -f Dockerfile.bind9 -t zix2045/bind-redos:latest --push .
+#
+# Локальная проверка:
+#   docker run --rm -it --entrypoint /bin/sh zix2045/bind-redos:latest
+#   named -v && dig -v && rndc -V && nc -h
+# =============================================================================
+
+FROM registry.red-soft.ru/redos8c/ubi:latest
+
+LABEL org.opencontainers.image.title="bind9" \
+      org.opencontainers.image.description="BIND 9 DNS server on RedOS 8 with DNS/network debugging tools" \
+      org.opencontainers.image.version="1.0.0"
+
+# ---------------------------------------------------------------------------
+# 1. Пакеты
+#
+#  bind            : named, rndc, named-checkconf, named-checkzone
+#  bind-utils      : dig, host, nslookup, nsupdate, delv
+#  iproute         : ip, ss            (замена netstat/ifconfig)
+#  iputils         : ping, arping
+#  traceroute      : traceroute
+#  nmap-ncat       : nc, ncat
+#  tcpdump         : tcpdump
+#  net-tools       : netstat, ifconfig, route, arp (deprecated)
+#  curl / wget     : проверка HTTP-API мастера
+#  ca-certificates : TLS для curl
+#  procps-ng       : ps, top, free, kill, pgrep
+#  lsof            : кто держит сокет/файл
+#  jq              : разбор JSON-ответов API
+#  bc              : арифметика в shell
+#  openssl         : TLS/сертификаты
+#
+# --setopt=install_weak_deps=False — не тянуть ldap/dyndb и прочие Recommends.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    dnf install -y --setopt=install_weak_deps=False \
+        bind \
+        bind-utils \
+        iproute \
+        iputils \
+        traceroute \
+        nmap-ncat \
+        tcpdump \
+        net-tools \
+        curl \
+        wget \
+        ca-certificates \
+        procps-ng \
+        lsof \
+        jq \
+        bc \
+        openssl \
+    ; \
+    dnf clean all; \
+    rm -rf /var/cache/dnf /var/cache/yum /var/log/dnf* /var/log/yum* /tmp/*
+
+# ---------------------------------------------------------------------------
+# 2. Пользователь и каталоги
+#
+# Пакет bind на RHEL-совместимых системах создаёт пользователя/группу named.
+# Чарт запускает контейнер от root (runAsUser: 0), но каталоги нужны заранее:
+#   /var/named            — корень зон (в чарте монтируется PVC)
+#   /var/named/slaves     — slave-зоны реплики (REPLICA_ZONE_SUBDIR=slaves)
+#   /run/named            — runtime (в чарте монтируется emptyDir)
+#   /config               — named.conf / named.zones.conf / rndc.* (emptyDir)
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    if ! getent group named >/dev/null; then groupadd -r named; fi; \
+    if ! id -u named >/dev/null 2>&1; then \
+        useradd -r -g named -s /sbin/nologin -d /var/named named; \
+    fi; \
+    mkdir -p \
+        /var/named \
+        /var/named/data \
+        /var/named/dynamic \
+        /var/named/slaves \
+        /run/named \
+        /config; \
+    chown -R root:named /var/named /run/named; \
+    chmod 775 /var/named /var/named/data /var/named/dynamic /var/named/slaves /run/named; \
+    \
+    # Симлинки чтобы голый `rndc` / `named-checkconf` внутри контейнера видели
+    # боевой конфиг из /config, а не дефолтный из пакета.
+    ln -sf /config/named.conf /etc/named.conf; \
+    ln -sf /config/named.zones.conf /etc/named.zones.conf; \
+    ln -sf /config/rndc.conf /etc/rndc.conf; \
+    ln -sf /config/rndc.key  /etc/rndc.key
+
+# ---------------------------------------------------------------------------
+# 3. Self-check на этапе сборки.
+#    Падаем только если нет named — остальное логируем, чтобы не ломать
+#    сборку из-за различий в путях между версиями пакета.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    command -v named >/dev/null 2>&1 || { echo "FATAL: named not found" >&2; exit 1; }; \
+    for bin in rndc named-checkconf named-checkzone dig host nslookup nsupdate \
+               nc ss ping traceroute tcpdump curl wget jq lsof; do \
+        if command -v "${bin}" >/dev/null 2>&1; then \
+            echo "OK:   ${bin}"; \
+        else \
+            echo "WARN: ${bin} not found"; \
+        fi; \
+    done; \
+    named -v
+
+# ---------------------------------------------------------------------------
+# 4. Runtime
+# ---------------------------------------------------------------------------
+# 53/tcp+udp — DNS, 953/tcp — rndc
+EXPOSE 53/tcp 53/udp 953/tcp
+
+STOPSIGNAL SIGTERM
+
+# Значения по умолчанию для автономного запуска образа.
+# В чарте поле command контейнера перекрывает ENTRYPOINT целиком,
+# а CMD (["-g"]) либо не используется, либо дублирует -g — безвредно.
+ENTRYPOINT ["/usr/sbin/named"]
+CMD ["-g"]
