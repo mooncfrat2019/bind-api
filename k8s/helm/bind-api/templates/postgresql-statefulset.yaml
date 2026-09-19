@@ -1,5 +1,6 @@
 {{- if and .Values.postgresql.enabled (gt (int .Values.replicaCount.master) 0) }}
 {{- $persistence := .Values.postgresql.primary.persistence }}
+{{- $pgStorageClass := $persistence.storageClass | default (include "bind-api.storageClass" .) }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -21,12 +22,18 @@ spec:
         {{- include "bind-api.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: postgresql
     spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext:
         fsGroup: 999
       containers:
         - name: postgresql
-          image: postgres:15-alpine
-          imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+          # Образ вынесен в values: ноды кластера могут не иметь доступа
+          # к Docker Hub, поэтому postgres тянется из приватного реестра.
+          image: "{{ .Values.postgresql.image.repository }}:{{ .Values.postgresql.image.tag }}"
+          imagePullPolicy: {{ .Values.postgresql.image.pullPolicy | default "IfNotPresent" }}
           ports:
             - name: postgres
               containerPort: 5432
@@ -46,7 +53,6 @@ spec:
           resources:
             {{- toYaml .Values.postgresql.primary.resources | nindent 12 }}
           # -d обязателен: без него libpq подставляет dbname = user ("bindapi")
-          # и каждая проба пишет в лог FATAL: database "bindapi" does not exist
           livenessProbe:
             exec:
               command:
@@ -84,8 +90,8 @@ spec:
         resources:
           requests:
             storage: {{ $persistence.size }}
-        {{- if $persistence.storageClass }}
-        storageClassName: {{ $persistence.storageClass }}
+        {{- if $pgStorageClass }}
+        storageClassName: {{ $pgStorageClass }}
         {{- end }}
   {{- end }}
 {{- end }}

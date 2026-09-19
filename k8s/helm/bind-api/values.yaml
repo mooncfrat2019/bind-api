@@ -15,6 +15,14 @@ global:
   imageRegistry: ""
   storageClass: ""
 
+# === imagePullSecrets ===
+# Список секретов для pull из приватного реестра. Применяется ко ВСЕМ pod'ам
+# чарта (bind-api master/replica, postgres, все init-контейнеры).
+# Создать: kubectl create secret docker-registry regcred \
+#   -n <ns> --docker-server=<host> --docker-username=<u> --docker-password=<p>
+imagePullSecrets: []
+#  - name: regcred
+
 # === Образ BIND-API ===
 image:
   repository: zix2045/bind-api

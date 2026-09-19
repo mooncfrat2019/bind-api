@@ -2,16 +2,25 @@ global:
   namespace: bind-dns
   storageClass: "csi-high-iops-ms1"
 
+
+# === imagePullSecrets ===
+# Секрет создаётся заранее:
+#   kubectl --kubeconfig config-vk -n bind-dns create secret docker-registry regcred \
+#     --docker-server=<registry-host> \
+#     --docker-username=<user> --docker-password=<pass>
+imagePullSecrets:
+  - name: regcred
+
 # === Образ BIND-API (один и тот же для master и replica) ===
 image:
-  repository: zix2045/bind-api
+  repository: bind-api.registry.twcstorage.ru/bind-api
   tag: latest
   pullPolicy: Always
 
 # === Образ BIND 9 (RedOS-сборка) ===
 bind:
   image:
-    repository: zix2045/bind-redos
+    repository: bind-api.registry.twcstorage.ru/bind-redos
     tag: "latest"
     pullPolicy: IfNotPresent
   config:
@@ -50,6 +59,10 @@ resources:
 # === Встроенный PostgreSQL (только на мастере) ===
 postgresql:
   enabled: true
+  image:
+    repository: bind-api.registry.twcstorage.ru/postgres
+    tag: "15-alpine"
+    pullPolicy: IfNotPresent
   auth:
     postgresPassword: "test-superuser-password"
     username: bindapi

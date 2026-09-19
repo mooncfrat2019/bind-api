@@ -26,6 +26,10 @@ spec:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         checksum/secrets: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
     spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if .Values.serviceAccount.create }}
       serviceAccountName: {{ include "bind-api.serviceAccountName" . }}
       {{- end }}
@@ -164,14 +168,20 @@ spec:
           resources:
             {{- toYaml .Values.bind.resources | nindent 12 }}
           livenessProbe:
-            tcpSocket:
-              port: 53
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "kill -0 $(cat /var/named/named.pid 2>/dev/null) 2>/dev/null"
             initialDelaySeconds: 30
             periodSeconds: 10
             timeoutSeconds: 5
           readinessProbe:
-            tcpSocket:
-              port: 53
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "dig @127.0.0.1 . > /dev/null 2>&1"
             initialDelaySeconds: 10
             periodSeconds: 5
             timeoutSeconds: 3
@@ -199,8 +209,6 @@ spec:
                 secretKeyRef:
                   name: {{ include "bind-api.fullname" . }}-secrets
                   key: MASTER_URL
-            # MASTER_API_TOKEN должен совпадать с SYNC_API_TOKEN мастера.
-            # В едином релизе оба лежат в одном Secret — расхождение исключено.
             - name: MASTER_API_TOKEN
               valueFrom:
                 secretKeyRef:
