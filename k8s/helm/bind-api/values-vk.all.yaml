@@ -1,15 +1,3 @@
-# =============================================================================
-# ЕДИНЫЙ values-файл. Один релиз ставит сразу и мастер, и реплики.
-#
-# Установка:
-#   helm upgrade --install bind-api ./k8s/helm/bind-api \
-#     -n bind-dns --create-namespace \
-#     -f k8s/helm/bind-api/values-vk.all.yaml \
-#     --set secrets.syncToken=$SYNC_TOKEN \
-#     --set secrets.masterApiToken=$SYNC_TOKEN \
-#     --set secrets.rndcKeySecret=$RNDC_KEY
-# =============================================================================
-
 global:
   namespace: bind-dns
   storageClass: "csi-high-iops-ms1"
@@ -20,7 +8,7 @@ image:
   tag: latest
   pullPolicy: Always
 
-# === Образ BIND 9 ===
+# === Образ BIND 9 (RedOS-сборка) ===
 bind:
   image:
     repository: zix2045/bind-redos
@@ -32,7 +20,7 @@ bind:
       - "172.16.0.0/12"
       - "192.168.0.0/16"
     allowTransfer:
-      - "10.0.0.0/8"   # ВАЖНО: должно покрывать подсеть подов реплик (для AXFR)
+      - "10.0.0.0/8"
     listenOn:
       - "any"
     listenOnV6:
@@ -71,7 +59,7 @@ postgresql:
     persistence:
       enabled: true
       size: 10Gi
-      storageClass: "hdd.network-drives.csi.timeweb.cloud"
+      storageClass: "csi-high-iops-ms1"
       createPV: false
       hostPath: ""
     resources:
@@ -109,7 +97,7 @@ master:
 zonesStorage:
   enabled: true
   size: 20Gi
-  storageClass: "hdd.network-drives.csi.timeweb.cloud"
+  storageClass: "csi-ceph-ssd-ms1"
   accessModes:
     - ReadWriteOnce
   createPV: false
