@@ -109,12 +109,18 @@ Master URL for replicas.
 
 {{/*
 Адрес мастера для директивы BIND masters { } (источник AXFR).
+
+ВАЖНО:
+  1. Это должен быть сервис, у которого ОТКРЫТ ПОРТ 53.
+     -api годится только для HTTP-API (порт 8080) и для AXFR не работает.
+  2. В BIND 9.18 masters{} принимает ТОЛЬКО IP-адреса, не имена.
+     Go-код на реплике резолвит это имя в IP на старте (см. resolveToIP).
 */}}
 {{- define "bind-api.replicaMasterIP" -}}
 {{- if and .Values.master .Values.master.ip }}
 {{- .Values.master.ip }}
 {{- else }}
-{{- printf "%s-api.%s.svc.cluster.local" (include "bind-api.fullname" .) .Release.Namespace }}
+{{- printf "%s-dns-internal.%s.svc.cluster.local" (include "bind-api.fullname" .) .Release.Namespace }}
 {{- end }}
 {{- end }}
 

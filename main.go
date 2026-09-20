@@ -35,10 +35,6 @@ func main() {
 	}
 	app.InitLogLevel()
 	app.InitConfig()
-	rebuildErr := app.RebuildZonesConfFromDisk()
-	if rebuildErr != nil {
-		app.Error("Zones rebuild error", rebuildErr)
-	}
 	app.InitQueueConfig()
 
 	// Определяем роль
@@ -58,6 +54,14 @@ func main() {
 	if app.AppRole == "master" {
 		app.SH = app.NewSH(app.Db)
 		app.Info("Синхронизация MASTER инициализирована")
+
+		// Восстанавливаем named.zones.conf из файлов зон на постоянном томе
+		// (сам конфиг лежит на emptyDir и теряется при пересоздании пода).
+		if err := app.RebuildZonesConfFromDisk(); err != nil {
+			app.Error("Не удалось восстановить named.zones.conf: %v", err)
+		} else if err := app.ReloadBind(); err != nil {
+			app.Error("Не удалось перезагрузить BIND после восстановления named.zones.conf: %v", err)
+		}
 
 		app.InitJobQueue()
 		app.Info("Очередь заданий инициализирована")

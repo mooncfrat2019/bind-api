@@ -2247,6 +2247,23 @@ func NewReplicaSync(masterURL, apiToken string, intervalSeconds int, enabled boo
 		transform.ZoneType = "slave"
 	}
 
+	// ВАЖНО: BIND 9.18 принимает в masters{} только IP-адреса. DNS-имя вроде
+	// bind-api-dns-internal.<ns>.svc.cluster.local в конфиге реплики он не
+	// понимает и падает с "unable to find primaries list". Поэтому резолвим
+	// имя здесь, один раз на старте. Если мастер переехал и его ClusterIP
+	// изменился — реплику надо перезапустить (в k8s ClusterIP-сервиса
+	// стабилен, так что на практике адрес не меняется).
+	if ip, err := resolveToIP(transform.MasterIP); err == nil {
+		if ip != transform.MasterIP {
+			Info("REPLICA_MASTER_IP %q разрешён в IP %s", transform.MasterIP, ip)
+		}
+		transform.MasterIP = ip
+	} else {
+		Error("Не удалось разрешить REPLICA_MASTER_IP %q: %v", transform.MasterIP, err)
+		// Оставляем исходное значение — BIND тогда не стартанёт, но в логах
+		// будет ЯСНАЯ причина, а не невнятный "unable to find primaries list".
+	}
+
 	if replacements := os.Getenv("REPLICA_CONFIG_REPLACEMENTS"); replacements != "" {
 		for _, repl := range strings.Split(replacements, "|") {
 			parts := strings.SplitN(repl, ":", 2)
@@ -2861,86 +2878,91 @@ func StartNamedConfWatcher() {
 		return
 	}
 
-	Info("Запуск мониторинга изменений /etc/named.conf (интервал: 30 сек)")
+	Info("Запуск мониторинга конфигов BIND (интервал: 30 сек)")
 
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 
 		// Первая проверка сразу
-		syncNamedConf()
+		syncBindConfigs()
 
 		for range ticker.C {
-			syncNamedConf()
+			syncBindConfigs()
 		}
 	}()
 }
 
-// syncNamedConf проверяет изменения в named.conf и сохраняет в БД если есть изменения
-func syncNamedConf() {
-	filePath := NamedConf
-	if filePath == "" {
-		filePath = DefaultNamedConf
+// syncBindConfigs проверяет и синхронизирует ОБА файла конфигурации.
+func syncBindConfigs() {
+	syncOneConfig("named_conf", NamedConf)
+	if ZoneConfFile != "" && ZoneConfFile != NamedConf {
+		syncOneConfig("zone_conf", ZoneConfFile)
 	}
-
-	// Проверяем существование файла
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		Warn("Файл %s не существует, пропускаем синхронизацию", filePath)
-		return
-	}
-
-	// Вычисляем текущий checksum
-	currentChecksum, err := calculateChecksum(filePath)
-	if err != nil {
-		Error("Ошибка вычисления checksum для %s: %v", filePath, err)
-		return
-	}
-
-	// Получаем последний checksum из БД
-	var lastState SyncState
-	if err := Db.Where("file_type = ? AND file_name = ?", "named_conf", filePath).
-		Order("version DESC").
-		First(&lastState).Error; err != nil {
-		// Если записей нет - сохраняем первую версию
-		if err == gorm.ErrRecordNotFound {
-			Info("Первая версия %s, сохраняем в БД", filePath)
-			saveNamedConfVersion(filePath, currentChecksum)
-			return
-		}
-		Error("Ошибка получения последней версии: %v", err)
-		return
-	}
-
-	// Сравниваем checksum
-	if lastState.Checksum == currentChecksum {
-		// Изменений нет - пропускаем
-		return
-	}
-
-	// Изменения есть - сохраняем новую версию
-	Info("📝 Обнаружены изменения в %s, сохраняем версию %d", filePath, lastState.Version+1)
-	saveNamedConfVersion(filePath, currentChecksum)
 }
 
-// saveNamedConfVersion сохраняет версию named.conf в БД
-func saveNamedConfVersion(filePath, checksum string) {
+// syncOneConfig проверяет изменения в одном файле и, если они есть,
+// сохраняет новую версию в sync_states.
+func syncOneConfig(fileType, filePath string) {
+	if filePath == "" || Db == nil {
+		return
+	}
+
+	// Файл может отсутствовать на реплике или в момент инициализации
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return
+	}
+
+	currentChecksum, err := calculateChecksum(filePath)
+	if err != nil {
+		Error("Ошибка вычисления checksum для %s (%s): %v", fileType, filePath, err)
+		return
+	}
+	if currentChecksum == "" {
+		return
+	}
+
+	var lastState SyncState
+	err = Db.Where("file_type = ? AND file_name = ?", fileType, filePath).
+		Order("version DESC").
+		First(&lastState).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			Info("Первая версия %s (%s), сохраняем в БД", fileType, filePath)
+			saveConfigVersion(fileType, filePath, currentChecksum)
+			return
+		}
+		Error("Ошибка получения последней версии %s: %v", fileType, err)
+		return
+	}
+
+	if lastState.Checksum == currentChecksum {
+		return
+	}
+
+	Info("📝 Обнаружены изменения в %s (%s), сохраняем версию %d",
+		fileType, filePath, lastState.Version+1)
+	saveConfigVersion(fileType, filePath, currentChecksum)
+}
+
+// saveConfigVersion сохраняет версию произвольного конфига в sync_states.
+func saveConfigVersion(fileType, filePath, checksum string) {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		Error("Ошибка чтения файла %s: %v", filePath, err)
 		return
 	}
 
-	// Получаем последний номер версии
 	var lastVersion int
 	Db.Model(&SyncState{}).
-		Where("file_type = ? AND file_name = ?", "named_conf", filePath).
+		Where("file_type = ? AND file_name = ?", fileType, filePath).
 		Select("COALESCE(MAX(version), 0)").
 		Scan(&lastVersion)
 
 	newVersion := lastVersion + 1
 
 	state := SyncState{
-		FileType:     "named_conf",
+		FileType:     fileType,
 		FileName:     filePath,
 		ZoneName:     "",
 		Checksum:     checksum,
@@ -2950,11 +2972,16 @@ func saveNamedConfVersion(filePath, checksum string) {
 	}
 
 	if err := Db.Create(&state).Error; err != nil {
-		Error("Ошибка сохранения версии в БД: %v", err)
+		Error("Ошибка сохранения версии %s в БД: %v", fileType, err)
 		return
 	}
 
-	Info(" Сохранена версия %d для %s (checksum: %s...)", newVersion, filePath, checksum[:16])
+	prefix := checksum
+	if len(prefix) > 16 {
+		prefix = prefix[:16]
+	}
+	Info(" Сохранена версия %d для %s (%s, checksum: %s...)",
+		newVersion, fileType, filePath, prefix)
 }
 
 // CheckARecordResolve проверяет, резолвится ли A запись через DNS реплики
@@ -3340,4 +3367,50 @@ func StartSyncStateCleaner() {
 			CleanupOrphanSyncStates()
 		}
 	}()
+}
+
+// resolveToIP превращает hostname в строку-IP. Если на входе уже IP — возвращает как есть.
+//
+// Нужен потому что BIND 9.18 больше НЕ принимает DNS-имена в директиве masters{}.
+// Всё, что не является IP-адресом, BIND трактует как ссылку на именованный
+// список primaries и падает с "unable to find primaries list <token>".
+func resolveToIP(host string) (string, error) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "", fmt.Errorf("пустой адрес")
+	}
+
+	// Уже IP — ничего делать не надо.
+	if ip := net.ParseIP(host); ip != nil {
+		if v4 := ip.To4(); v4 != nil {
+			return v4.String(), nil
+		}
+		return ip.String(), nil
+	}
+
+	// Может быть "host:port" — отрезаем порт, если он есть.
+	h := host
+	if hp, _, err := net.SplitHostPort(host); err == nil {
+		h = hp
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, h)
+	if err != nil {
+		return "", fmt.Errorf("не удалось разрешить %q: %w", h, err)
+	}
+	if len(ips) == 0 {
+		return "", fmt.Errorf("не найдено IP для %q", h)
+	}
+
+	// Предпочитаем IPv4: BIND слушает на IPv4 надёжнее, и `masters` с IPv4
+	// не провоцирует лишние семьи сокетов.
+	for _, ipa := range ips {
+		if v4 := ipa.IP.To4(); v4 != nil {
+			return v4.String(), nil
+		}
+	}
+	return ips[0].IP.String(), nil
 }
