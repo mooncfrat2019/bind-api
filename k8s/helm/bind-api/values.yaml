@@ -161,10 +161,6 @@ config:
 service:
   dns:
     enabled: true
-    type: ClusterIP
-    externalTrafficPolicy: Cluster
-    nodePort: 30053
-    annotations: {}
 
   # HTTP-API мастера
   api:
@@ -180,10 +176,12 @@ service:
   # При type=NodePort используются общие ноды и порт dnsLb.nodePort,
   # при type=LoadBalancer — свой внешний IP от облачного LBaaS.
   dnsLb:
-    enabled: false
+    enabled: true
     type: LoadBalancer
     externalTrafficPolicy: Cluster
-    nodePort: 30054
+    # Фиксированный IP (если LB-контроллер это умеет — MetalLB с IPAddressPool).
+    # Пусто — LB-контроллер выдаст любой свободный.
+    loadBalancerIP: ""
     annotations: {}
 
   # Внешний адрес для КАЖДОЙ реплики по отдельности.

@@ -151,10 +151,6 @@ config:
 service:
   dns:
     enabled: true
-    type: NodePort
-    externalTrafficPolicy: Cluster
-    nodePort: 30053
-    annotations: {}
 
   # HTTP-API. UDP не нужен, LBaaS работает штатно.
   api:
@@ -171,18 +167,9 @@ service:
   #   получите ОДИН внешний IP на все реплики.
   dnsLb:
     enabled: true
-    type: NodePort
+    type: LoadBalancer
     externalTrafficPolicy: Cluster
-    nodePort: 30054
-    annotations: {}
-
-  # Пер-репличный внешний DNS. Каждая реплика получает свой сервис
-  # bind-api-replica-N-dns с портом 30100+N.
-  # Можно публиковать эти адреса отдельными NS-записями.
-  replicaDns:
-    enabled: true
-    type: NodePort
-    externalTrafficPolicy: Cluster
+    loadBalancerIP: ""
     annotations: {}
 
 # === Ingress ===
