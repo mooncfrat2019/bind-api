@@ -19,6 +19,7 @@ spec:
       labels:
         {{- include "bind-api.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: replica
+        bind-api/dns-server: "true"
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "{{ include "bind-api.apiPort" . }}"

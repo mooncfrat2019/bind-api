@@ -1,44 +1,29 @@
+{{- /*
+DNS-сервисы. Четыре роли:
+
+1. bind-api-dns-internal  — ClusterIP, селектит мастер.
+   Для внутрикластерных клиентов (CoreDNS forwarding).
+
+2. bind-api-dns-external  — LoadBalancer/NodePort, селектит мастер.
+   Старое поведение: единая точка входа наружу, если реплик нет.
+
+3. bind-api-dns-lb        — LoadBalancer/NodePort, селектит мастер + ВСЕ реплики.
+   Единый внешний IP, kube-proxy балансирует между живыми подами.
+   Именно этот сервис нужен, если хочется HA без ручного выбора пода.
+   Управляется service.dnsLb.enabled.
+
+4. bind-api-replica-N-dns — LoadBalancer/NodePort, селектит конкретный под реплики
+   (statefulset.kubernetes.io/pod-name). Нужно, когда каждую реплику
+   публикуют отдельной NS-записью. Управляется service.replicaDns.enabled.
+
+Селект #3 опирается на метку bind-api/dns-server: "true", которую StatefulSet'ы
+master и replica вешают на СВОИ поды. PostgreSQL её не несёт — случайно
+не попадёт в LB.
+*/ -}}
+
 {{- if gt (int .Values.replicaCount.master) 0 }}
-# ─── Внешний DNS-сервис ──────────────────────────────────────────────────────
-# Порт 53 TCP+UDP. Наружу отдаётся master-подом.
-# Если отдаёте через LoadBalancer — учтите: UDP-LB поддерживают не все
-# провайдеры. NodePort работает всегда, но клиентам нужен IP ноды.
-apiVersion: v1
-kind: Service
-metadata:
-  name: {{ include "bind-api.fullname" . }}-dns-external
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "bind-api.labels" . | nindent 4 }}
-spec:
-  type: {{ .Values.service.dns.type | default "ClusterIP" }}
-  {{- if eq .Values.service.dns.type "LoadBalancer" }}
-  externalTrafficPolicy: {{ .Values.service.dns.externalTrafficPolicy | default "Local" }}
-  {{- end }}
-  {{- if eq .Values.service.dns.type "NodePort" }}
-  externalTrafficPolicy: {{ .Values.service.dns.externalTrafficPolicy | default "Local" }}
-  {{- end }}
-  selector:
-    {{- include "bind-api.selectorLabels" . | nindent 4 }}
-    app.kubernetes.io/component: master
-  ports:
-    - port: 53
-      {{- if eq .Values.service.dns.type "NodePort" }}
-      nodePort: {{ .Values.service.dns.nodePort | default 30053 }}
-      {{- end }}
-      targetPort: dns-tcp
-      name: dns-tcp
-      protocol: TCP
-    - port: 53
-      {{- if eq .Values.service.dns.type "NodePort" }}
-      nodePort: {{ .Values.service.dns.nodePort | default 30053 }}
-      {{- end }}
-      targetPort: dns-udp
-      name: dns-udp
-      protocol: UDP
----
-# ─── Внутренний DNS-сервис (ClusterIP) ───────────────────────────────────────
-# Для клиентов внутри кластера: CoreDNS forwarding, pod dnsConfig и т.п.
+
+# ─── 1. Внутренний DNS (ClusterIP) ───────────────────────────────────────────
 apiVersion: v1
 kind: Service
 metadata:
@@ -46,6 +31,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "bind-api.labels" . | nindent 4 }}
+    bind-api/service: dns-internal
 spec:
   type: ClusterIP
   selector:
@@ -60,4 +46,156 @@ spec:
       targetPort: dns-udp
       name: dns-udp
       protocol: UDP
-{{- end }}
+
+{{- if .Values.service.dns.enabled }}
+---
+
+# ─── 2. Внешний DNS на мастера ───────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bind-api.fullname" . }}-dns-external
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "bind-api.labels" . | nindent 4 }}
+    bind-api/service: dns-external
+    app.kubernetes.io/component: master
+  {{- with .Values.service.dns.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.dns.type | default "ClusterIP" }}
+  {{- if or (eq .Values.service.dns.type "LoadBalancer") (eq .Values.service.dns.type "NodePort") }}
+  externalTrafficPolicy: {{ .Values.service.dns.externalTrafficPolicy | default "Cluster" }}
+  {{- end }}
+  selector:
+    {{- include "bind-api.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: master
+  ports:
+    - port: 53
+      {{- if eq .Values.service.dns.type "NodePort" }}
+      nodePort: {{ .Values.service.dns.nodePort | default 30053 }}
+      {{- end }}
+      targetPort: dns-tcp
+      name: dns-tcp
+      protocol: TCP
+    - port: 53
+      {{- if eq .Values.service.dns.type "NodePort" }}
+      nodePort: {{ .Values.service.dns.nodePort | default 30053 }}
+      {{- end }}
+      targetPort: dns-udp
+      name: dns-udp
+      protocol: UDP
+{{- end }}{{/* service.dns.enabled */}}
+
+{{- end }}{{/* master > 0 */}}
+
+{{- if and .Values.service.dnsLb.enabled (or (gt (int .Values.replicaCount.master) 0) (gt (int .Values.replicaCount.replica) 0)) }}
+
+---
+
+# ─── 3. Общий LB по всем DNS-подам (мастер + все реплики) ────────────────────
+# Единый внешний IP, kube-proxy балансирует по живым подам (round-robin).
+# Проверка готовности подов — readinessProbe на bind9, поэтому NotReady
+# автоматически выпадает из балансировки.
+#
+# externalTrafficPolicy:
+#   Cluster (по умолчанию) — трафик принимает любая нода, kube-proxy
+#       проксирует на нужный под; устойчиво к любым раскладам.
+#   Local — трафик принимает только та нода, где есть под DNS;
+#       экономит хоп и сохраняет клиентский IP, но требует,
+#       чтобы LBaaS провайдера корректно выбирал healthy-ноды.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bind-api.fullname" . }}-dns-lb
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "bind-api.labels" . | nindent 4 }}
+    bind-api/service: dns-lb
+  {{- with .Values.service.dnsLb.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.dnsLb.type | default "LoadBalancer" }}
+  {{- if or (eq .Values.service.dnsLb.type "LoadBalancer") (eq .Values.service.dnsLb.type "NodePort") }}
+  externalTrafficPolicy: {{ .Values.service.dnsLb.externalTrafficPolicy | default "Cluster" }}
+  {{- end }}
+  selector:
+    {{- include "bind-api.selectorLabels" . | nindent 4 }}
+    bind-api/dns-server: "true"
+  ports:
+    - port: 53
+      {{- if eq .Values.service.dnsLb.type "NodePort" }}
+      nodePort: {{ .Values.service.dnsLb.nodePort | default 30054 }}
+      {{- end }}
+      targetPort: dns-tcp
+      name: dns-tcp
+      protocol: TCP
+    - port: 53
+      {{- if eq .Values.service.dnsLb.type "NodePort" }}
+      nodePort: {{ .Values.service.dnsLb.nodePort | default 30054 }}
+      {{- end }}
+      targetPort: dns-udp
+      name: dns-udp
+      protocol: UDP
+
+{{- end }}{{/* service.dnsLb.enabled */}}
+
+{{- if and .Values.service.replicaDns.enabled (gt (int .Values.replicaCount.replica) 0) }}
+
+{{- range $i := until (int .Values.replicaCount.replica) }}
+
+---
+
+# ─── 4.{{ $i }} Внешний DNS на конкретную реплику {{ $i }} ──────────────────
+# Селектор по statefulset.kubernetes.io/pod-name указывает РОВНО на один под.
+# Эту метку контроллер StatefulSet ставит каждому поду автоматически.
+#
+# Зачем: можно публиковать каждую реплику отдельной NS-записью.
+# Клиентские резолверы распределяют нагрузку между NS сами.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bind-api.fullname" $ }}-replica-{{ $i }}-dns
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "bind-api.labels" $ | nindent 4 }}
+    bind-api/service: dns-replica
+    app.kubernetes.io/component: replica
+    app.kubernetes.io/pod-index: "{{ $i }}"
+  {{- with $.Values.service.replicaDns.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $.Values.service.replicaDns.type | default "LoadBalancer" }}
+  {{- if or (eq $.Values.service.replicaDns.type "LoadBalancer") (eq $.Values.service.replicaDns.type "NodePort") }}
+  externalTrafficPolicy: {{ $.Values.service.replicaDns.externalTrafficPolicy | default "Cluster" }}
+  {{- end }}
+  selector:
+    {{- include "bind-api.selectorLabels" $ | nindent 4 }}
+    app.kubernetes.io/component: replica
+    statefulset.kubernetes.io/pod-name: {{ include "bind-api.fullname" $ }}-replica-{{ $i }}
+  ports:
+    - port: 53
+      {{- if eq $.Values.service.replicaDns.type "NodePort" }}
+      # Каждой реплике — свой nodePort, иначе K8s отвергнет вторую
+      nodePort: {{ add 30100 $i }}
+      {{- end }}
+      targetPort: dns-tcp
+      name: dns-tcp
+      protocol: TCP
+    - port: 53
+      {{- if eq $.Values.service.replicaDns.type "NodePort" }}
+      nodePort: {{ add 30100 $i }}
+      {{- end }}
+      targetPort: dns-udp
+      name: dns-udp
+      protocol: UDP
+
+{{- end }}{{/* range */}}
+
+{{- end }}{{/* service.replicaDns.enabled */}}

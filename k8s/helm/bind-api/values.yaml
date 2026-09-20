@@ -160,10 +160,42 @@ config:
 # === Сервисы ===
 service:
   dns:
+    enabled: true
     type: ClusterIP
+    externalTrafficPolicy: Cluster
+    nodePort: 30053
+    annotations: {}
+
+  # HTTP-API мастера
   api:
     type: ClusterIP
     port: 8080
+    externalTrafficPolicy: Cluster
+    nodePort: 30080
+    annotations: {}
+
+  # ОБЩИЙ балансировщик по всем DNS-подам (мастер + все реплики).
+  # Включайте, когда replicaCount.replica > 0: получите один внешний
+  # адрес и автоматический HA через kube-proxy.
+  # При type=NodePort используются общие ноды и порт dnsLb.nodePort,
+  # при type=LoadBalancer — свой внешний IP от облачного LBaaS.
+  dnsLb:
+    enabled: false
+    type: LoadBalancer
+    externalTrafficPolicy: Cluster
+    nodePort: 30054
+    annotations: {}
+
+  # Внешний адрес для КАЖДОЙ реплики по отдельности.
+  # Нужно, если публикуете каждую реплику отдельной NS-записью.
+  # Каждая реплика получает свой сервис: <fullname>-replica-N-dns
+  # и, при type=LoadBalancer, свой внешний IP.
+  # При type=NodePort порты 30100, 30101, ...
+  replicaDns:
+    enabled: false
+    type: LoadBalancer
+    externalTrafficPolicy: Cluster
+    annotations: {}
 
 # === Ingress ===
 ingress:

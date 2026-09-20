@@ -150,11 +150,39 @@ config:
 # === Сервисы ===
 service:
   dns:
-    type: LoadBalancer
+    enabled: true
+    type: NodePort
+    externalTrafficPolicy: Cluster
+    nodePort: 30053
+    annotations: {}
+
+  # HTTP-API. UDP не нужен, LBaaS работает штатно.
   api:
     type: LoadBalancer
     port: 8080
-    externalTrafficPolicy: Local
+    externalTrafficPolicy: Cluster
+    annotations: {}
+
+  # ОБЩИЙ балансировщик по мастеру и ВСЕМ репликам.
+  # Вариант A (без LB): NodePort на каждой ноде, UDP работает.
+  #   Клиенты внутри VPC ходят на <NODE_IP>:30054, а DNS-резолвер
+  #   между адресами нод раскидывает сам (round-robin по A-записям).
+  # Вариант B (если LB у VK заведётся с UDP): type: LoadBalancer —
+  #   получите ОДИН внешний IP на все реплики.
+  dnsLb:
+    enabled: true
+    type: NodePort
+    externalTrafficPolicy: Cluster
+    nodePort: 30054
+    annotations: {}
+
+  # Пер-репличный внешний DNS. Каждая реплика получает свой сервис
+  # bind-api-replica-N-dns с портом 30100+N.
+  # Можно публиковать эти адреса отдельными NS-записями.
+  replicaDns:
+    enabled: true
+    type: NodePort
+    externalTrafficPolicy: Cluster
     annotations: {}
 
 # === Ingress ===
