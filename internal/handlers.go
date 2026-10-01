@@ -722,9 +722,14 @@ func HandleRevokeAPIKey(c *gin.Context) {
 	// ВАЖНО: раньше ID из URL передавался в Db.Delete как строка —
 	// GORM нечисловую строку трактует как raw-условие (риск инъекции).
 	// Поэтому парсим ID явно и работаем с uint.
+	//
+	// Bad integer conversion: ParseUint(keyIDStr, 10, 64) + uint(keyID) на
+	// 32-битных платформах обрезал бы значение молча. Парсим сразу с bitSize=32:
+	// это гарантирует, что результат гарантированно помещается в uint
+	// (uint всегда >= 32 бит), а проверку верхней границы делает сама strconv.
 	keyIDStr := c.Param("id")
 
-	keyID, err := strconv.ParseUint(keyIDStr, 10, 64)
+	keyID, err := strconv.ParseUint(keyIDStr, 10, 32)
 	if err != nil {
 		Error("Некорректный ID ключа %q", keyIDStr)
 		c.JSON(http.StatusBadRequest, gin.H{
