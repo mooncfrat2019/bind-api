@@ -109,6 +109,70 @@ func HandleListZones(c *gin.Context) {
 	sendResponse(c, http.StatusOK, true, "Список зон", gin.H{"zones": zoneInfos})
 }
 
+// allowedConfigDirs возвращает нормализованные каталоги, внутри которых приложению
+// разрешено изменять конфигурационные файлы BIND. Список строится из настроек
+// приложения, а не из пользовательского ввода.
+func allowedConfigDirs() []string {
+	candidates := []string{
+		filepath.Dir(NamedConf),
+		filepath.Dir(ZoneConfFile),
+		// ZoneDir — только если конфиг зоны по замыслу может лежать рядом с файлами зон.
+		// Если это не так, строку можно убрать: правило "чем уже allowlist, тем лучше".
+		ZoneDir,
+	}
+
+	dirs := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		abs, err := filepath.Abs(candidate)
+		if err != nil {
+			continue
+		}
+		dirs = append(dirs, filepath.Clean(abs))
+	}
+	return dirs
+}
+
+// resolveConfigFilePath валидирует путь к конфигурационному файлу, полученный из
+// пользовательских данных: он должен быть абсолютным, не содержать нулевых байтов
+// и после нормализации (включая раскрытие symlink'ов) находиться внутри одного из
+// разрешённых каталогов BIND. Возвращает нормализованный путь либо ошибку.
+func resolveConfigFilePath(raw string) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return "", fmt.Errorf("путь к конфигурационному файлу не задан")
+	}
+
+	if strings.ContainsRune(raw, 0) {
+		return "", fmt.Errorf("путь содержит недопустимый нулевой байт")
+	}
+
+	if !filepath.IsAbs(raw) {
+		return "", fmt.Errorf("путь к конфигурационному файлу должен быть абсолютным")
+	}
+
+	absPath := filepath.Clean(raw)
+
+	// Раскрываем символические ссылки, чтобы нельзя было выйти за пределы разрешённого
+	// каталога через подставной symlink. Для несуществующего файла игнорируем ошибку —
+	// существование проверяется отдельно.
+	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
+		absPath = resolved
+	}
+
+	for _, dir := range allowedConfigDirs() {
+		rel, err := filepath.Rel(dir, absPath)
+		if err != nil {
+			continue
+		}
+		// Путь должен быть вложенным: отбрасываем "." (сам каталог), ".." и "../..."
+		if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		return absPath, nil
+	}
+
+	return "", fmt.Errorf("путь %q находится вне разрешённых каталогов", raw)
+}
+
 func HandleCreateZone(c *gin.Context) {
 	var req ZoneRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -234,14 +298,42 @@ func HandleCreateZone(c *gin.Context) {
 		} else {
 			targetConfigFile = zones[0].ConfigFile
 		}
+	} else {
+		// req.ConfigFile приходит от клиента, поэтому путь нельзя использовать «как есть»:
+		// иначе он может указывать на любой файл в системе (/etc/passwd, ../../etc/cron.d/...).
+		validatedPath, err := resolveConfigFilePath(targetConfigFile)
+		if err != nil {
+			Error("Недопустимый путь к конфигурационному файлу %q: %v", req.ConfigFile, err)
+			sendResponse(c, http.StatusBadRequest, false,
+				"Недопустимый путь к конфигурационному файлу",
+				"Путь должен быть абсолютным и находиться внутри каталогов BIND")
+			return
+		}
+		targetConfigFile = validatedPath
 	}
 
-	// Проверяем что конфиг файл существует и доступен для записи
-	if _, err := os.Stat(targetConfigFile); os.IsNotExist(err) {
-		Error("Конфигурационный файл не найден %s", targetConfigFile)
+	// Проверяем, что конфиг файл существует, является обычным файлом и доступен для записи
+	info, err := os.Stat(targetConfigFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			Error("Конфигурационный файл не найден %s", targetConfigFile)
+			sendResponse(c, http.StatusBadRequest, false,
+				"Конфигурационный файл не найден",
+				fmt.Sprintf("Файл %s не существует", targetConfigFile))
+		} else {
+			Error("Ошибка доступа к конфигурационному файлу %s: %v", targetConfigFile, err)
+			sendResponse(c, http.StatusBadRequest, false,
+				"Ошибка доступа к конфигурационному файлу",
+				"Файл недоступен")
+		}
+		return
+	}
+
+	if !info.Mode().IsRegular() {
+		Error("Конфигурационный файл не является обычным файлом %s", targetConfigFile)
 		sendResponse(c, http.StatusBadRequest, false,
-			"Конфигурационный файл не найден",
-			fmt.Sprintf("Файл %s не существует", targetConfigFile))
+			"Недопустимый конфигурационный файл",
+			"Путь должен указывать на обычный файл")
 		return
 	}
 
